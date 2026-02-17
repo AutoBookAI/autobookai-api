@@ -11,6 +11,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { pool } = require('../db');
 const { buildMemoryDocument } = require('./openclaw');
 const { decryptJSON, decrypt } = require('./encryption');
+const { BrowserSession, executeBrowserAction } = require('./browser');
 
 const anthropic = new Anthropic();
 
@@ -105,6 +106,31 @@ const TOOL_DEFINITIONS = [
       required: ['eventId'],
     },
   },
+  {
+    name: 'browser_action',
+    description: `Control a headless browser to interact with websites. Use for tasks that require filling forms, clicking buttons, or navigating multi-step flows (booking restaurants, ordering rides, making reservations, filling out web forms).
+
+Each call returns the page state: title, URL, visible text, form fields, and clickable elements. Use this to decide your next action.
+
+IMPORTANT: For any action that submits a payment or confirms a paid booking, you MUST stop and ask the customer for confirmation first. Do NOT click "Place Order", "Confirm Booking", "Pay Now", or similar buttons without explicit user approval.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['navigate', 'click', 'type', 'select', 'extract', 'wait', 'back', 'scroll'],
+          description: 'The browser action to perform',
+        },
+        url:          { type: 'string', description: 'URL to navigate to (for "navigate")' },
+        selector:     { type: 'string', description: 'CSS selector to target (for click, type, select)' },
+        text:         { type: 'string', description: 'Text to find element by (for click) or field label (for type)' },
+        value:        { type: 'string', description: 'Text to type (for "type") or option value (for "select")' },
+        direction:    { type: 'string', enum: ['up', 'down'], description: 'Scroll direction (for "scroll")' },
+        milliseconds: { type: 'integer', description: 'Wait duration in ms, max 5000 (for "wait")' },
+      },
+      required: ['action'],
+    },
+  },
 ];
 
 // ── Activity logging (fire-and-forget) ──────────────────────────────────────
@@ -174,6 +200,10 @@ async function executeTool(customerId, toolName, toolInput) {
       return { deleted: true };
     }
 
+    case 'browser_action':
+      // Handled inline in handleMessage() for session lifecycle — should not reach here
+      return { error: 'browser_action must be handled in handleMessage context' };
+
     default:
       return { error: `Unknown tool: ${toolName}` };
   }
@@ -192,18 +222,37 @@ ${profileDocument}
 
 ═══ BROWSER AUTOMATION ═══
 
-You have tools for web search and fetching webpages. Use these for tasks that require looking up information. For bookings that require navigating websites, provide the customer with direct links and step-by-step guidance.
+You have a browser_action tool that controls a headless browser. Use it for tasks that require interacting with websites — filling forms, clicking buttons, navigating booking flows.
 
-RESTAURANT RESERVATIONS (OpenTable / Resy):
-- Search for the restaurant and provide booking links
-- Include the customer's dietary restrictions in any notes
-- Confirm the full reservation details with the customer
+HOW TO USE:
+1. Start with action "navigate" to go to a URL
+2. Read the returned page state (title, visible text, form fields, clickable elements)
+3. Use "type" to fill form fields, "click" to press buttons, "select" for dropdowns
+4. Each action returns the updated page state — use it to decide your next step
+5. Use "extract" to re-read the current page without changing anything
 
-TRAVEL BOOKINGS (flights, hotels):
-- Use the customer's preferred airlines and cabin class from their profile
-- Apply seat preference when relevant
-- Always present the top 2-3 options with prices before booking
-- Use loyalty program numbers from the customer's profile when available
+ACTIONS: navigate, click, type, select, extract, wait (up to 5s), back, scroll (up/down)
+
+PAYMENT CONFIRMATION PROTOCOL:
+Before clicking any button that submits payment or confirms a paid booking:
+1. STOP using browser_action
+2. Tell the customer exactly what you are about to do:
+   - Service/item being purchased
+   - Total price including fees and taxes
+   - Any relevant details (date, time, party size, pickup/dropoff, etc.)
+3. Ask: "Shall I go ahead and confirm this?"
+4. Wait for the customer to reply with confirmation
+5. Only then start a new browser session to complete the booking
+
+Free actions need no confirmation: searching, filling forms, selecting dates/times, browsing menus and prices.
+
+TIPS:
+- Prefer CSS selectors (#id, [name="..."]) over text matching — more reliable
+- If a page hasn't fully loaded, use "wait" then "extract"
+- If a click doesn't navigate, the page may have updated dynamically — use "extract"
+- Use the customer's profile data to pre-fill forms (name, email, dietary restrictions, etc.)
+- Include dietary restrictions in restaurant reservation notes
+- Use preferred airlines, cabin class, and loyalty numbers for travel bookings
 
 ═══ RULES ═══
 
@@ -305,60 +354,88 @@ async function handleMessage(customerId, userMessage) {
     { role: 'user', content: userMessage },
   ];
 
-  // 5. Call Claude in a tool-use loop
-  let response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5-20250929',
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages,
-    tools: TOOL_DEFINITIONS,
-  });
+  // Browser session — persists across tool-use loop iterations, cleaned up in finally
+  let browserSession = null;
 
-  // Process tool calls in a loop until we get a final text response
-  while (response.stop_reason === 'tool_use') {
-    const assistantContent = response.content;
-    messages.push({ role: 'assistant', content: assistantContent });
-
-    const toolResults = [];
-    for (const block of assistantContent) {
-      if (block.type === 'tool_use') {
-        let result;
-        try {
-          result = await executeTool(customerId, block.name, block.input);
-        } catch (err) {
-          console.error(`Tool ${block.name} failed for customer ${customerId}:`, err.message);
-          result = { error: err.message };
-        }
-
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: JSON.stringify(result),
-        });
-      }
-    }
-
-    messages.push({ role: 'user', content: toolResults });
-
-    response = await anthropic.messages.create({
+  try {
+    // 5. Call Claude in a tool-use loop
+    let response = await anthropic.messages.create({
       model: 'claude-sonnet-4-5-20250929',
       max_tokens: 4096,
       system: systemPrompt,
       messages,
       tools: TOOL_DEFINITIONS,
     });
+
+    // Process tool calls in a loop until we get a final text response
+    while (response.stop_reason === 'tool_use') {
+      const assistantContent = response.content;
+      messages.push({ role: 'assistant', content: assistantContent });
+
+      const toolResults = [];
+      for (const block of assistantContent) {
+        if (block.type === 'tool_use') {
+          let result;
+          try {
+            if (block.name === 'browser_action') {
+              // Lazy-init browser session on first use
+              if (!browserSession) {
+                browserSession = new BrowserSession();
+                await browserSession.init();
+              }
+              result = await executeBrowserAction(
+                browserSession,
+                block.input.action,
+                block.input
+              );
+              logActivity(customerId, 'browser_action',
+                `Browser ${block.input.action}: ${block.input.url || block.input.selector || block.input.text || ''}`,
+                { action: block.input.action, url: browserSession.page?.url() }
+              );
+            } else {
+              result = await executeTool(customerId, block.name, block.input);
+            }
+          } catch (err) {
+            console.error(`Tool ${block.name} failed for customer ${customerId}:`, err.message);
+            result = { error: err.message };
+          }
+
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(result),
+          });
+        }
+      }
+
+      messages.push({ role: 'user', content: toolResults });
+
+      response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages,
+        tools: TOOL_DEFINITIONS,
+      });
+    }
+
+    // 6. Extract final text response
+    const replyText = response.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join('\n');
+
+    // 7. Save to conversation history
+    await saveMessages(customerId, userMessage, replyText);
+
+    return replyText || 'I processed your request but had no text response. Please try again.';
+
+  } finally {
+    // Always clean up browser session
+    if (browserSession) {
+      await browserSession.close();
+    }
   }
-
-  // 6. Extract final text response
-  const replyText = response.content
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
-    .join('\n');
-
-  // 7. Save to conversation history
-  await saveMessages(customerId, userMessage, replyText);
-
-  return replyText || 'I processed your request but had no text response. Please try again.';
 }
 
 module.exports = { handleMessage };

@@ -1,0 +1,3 @@
+# Chromium system dependencies for Puppeteer on Railway
+[phases.setup]
+nixPkgs = ["chromium", "nss", "atk", "at-spi2-atk", "cups", "libdrm", "libxkbcommon", "mesa", "pango", "cairo", "glib"]
