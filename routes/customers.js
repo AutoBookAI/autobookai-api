@@ -139,7 +139,7 @@ router.patch('/:id/profile', async (req, res) => {
     dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
     preferred_airlines, seat_preference, cabin_class, hotel_preferences,
     loyalty_numbers, full_name, date_of_birth, passport_number, preferred_contact,
-    timezone, gmail_app_password,
+    timezone, gmail_app_password, assistant_name,
   } = req.body;
 
   try {
@@ -176,13 +176,14 @@ router.patch('/:id/profile', async (req, res) => {
          preferred_contact    = COALESCE($13, preferred_contact),
          timezone             = COALESCE($14, timezone),
          gmail_app_password   = COALESCE($15, gmail_app_password),
+         assistant_name       = COALESCE($16, assistant_name),
          updated_at           = NOW()
-       WHERE customer_id = $16`,
+       WHERE customer_id = $17`,
       [
         dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
         preferred_airlines, seat_preference, cabin_class, hotel_preferences,
         encryptedLoyalty, full_name, encryptedDOB, encryptedPassport, preferred_contact,
-        timezone, encryptedGmail, req.params.id,
+        timezone, encryptedGmail, assistant_name, req.params.id,
       ]
     );
 

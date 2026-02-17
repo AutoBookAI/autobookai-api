@@ -13,7 +13,7 @@ const { pool } = require('../db');
  * This prevents wasting numbers and Railway resources on abandoned checkouts.
  */
 router.post('/', async (req, res) => {
-  const { name, email, password } = req.body;
+  const { name, email, password, assistant_name } = req.body;
 
   if (!name || !email || !password) {
     return res.status(400).json({ error: 'Name, email, and password are required' });
@@ -47,10 +47,10 @@ router.post('/', async (req, res) => {
     );
     const customer = cResult.rows[0];
 
-    // Create empty profile
+    // Create profile with AI assistant name
     await client.query(
-      'INSERT INTO customer_profiles (customer_id) VALUES ($1)',
-      [customer.id]
+      'INSERT INTO customer_profiles (customer_id, assistant_name) VALUES ($1, $2)',
+      [customer.id, assistant_name || null]
     );
 
     await client.query('COMMIT');
