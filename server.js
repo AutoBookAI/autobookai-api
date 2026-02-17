@@ -7,6 +7,9 @@ const { pool, initDB } = require('./db');
 
 const app = express();
 
+// ── Trust proxy (Railway sits behind a reverse proxy) ─────────────────────────
+app.set('trust proxy', 1);
+
 // ── Security headers ──────────────────────────────────────────────────────────
 app.use(helmet());
 

@@ -120,6 +120,9 @@ async function initDB() {
       ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS gmail_app_password TEXT;
       ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS openclaw_password TEXT;
       ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'America/Los_Angeles';
+
+      -- Encrypted fields need TEXT, not VARCHAR(50) — ciphertext is ~90+ chars
+      ALTER TABLE customer_profiles ALTER COLUMN date_of_birth TYPE TEXT;
     `);
 
     // ── Indexes (safe to re-run) ────────────────────────────────────────
