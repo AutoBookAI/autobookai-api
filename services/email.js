@@ -1,46 +1,24 @@
 const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const { pool } = require('../db');
 const { decrypt } = require('./encryption');
 
 /**
  * Send an email on behalf of a customer.
  *
- * Supports two modes:
- *  1. Customer has their own Gmail app-password stored → send from their address
- *  2. Fall back to the platform SMTP account → send from platform address
+ * Primary:  Resend HTTP API (port 443 — works on all cloud platforms)
+ * Fallback: Customer's own Gmail app-password via nodemailer (if configured)
  *
- * Customer Gmail credentials are stored encrypted in customer_profiles.gmail_app_password
+ * SMTP over ports 587/465 is blocked on Railway and many cloud hosts.
+ * Resend uses HTTPS so it always works.
  */
 
-// Platform-level transporter (fallback)
-function getPlatformTransporter() {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) return null;
-
-  // Use Gmail service (port 465 SSL) — more reliable on cloud platforms than STARTTLS on 587
-  if (process.env.SMTP_HOST === 'smtp.gmail.com') {
-    return nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    });
-  }
-
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT || '465'),
-    secure: true,
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 30000,
-  });
-}
-
-// Customer-specific Gmail transporter
-function getGmailTransporter(email, appPassword) {
-  return nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: email, pass: appPassword },
-  });
+let resendClient = null;
+function getResend() {
+  if (resendClient) return resendClient;
+  if (!process.env.RESEND_API_KEY) return null;
+  resendClient = new Resend(process.env.RESEND_API_KEY);
+  return resendClient;
 }
 
 /**
@@ -55,7 +33,6 @@ async function sendEmail(customerId, { to, subject, body, cc, bcc }) {
     throw new Error('Missing required fields: to, subject, body');
   }
 
-  // Try to get customer's own Gmail credentials
   const profileResult = await pool.query(
     'SELECT gmail_app_password FROM customer_profiles WHERE customer_id=$1',
     [customerId]
@@ -64,38 +41,47 @@ async function sendEmail(customerId, { to, subject, body, cc, bcc }) {
   const customerResult = await pool.query('SELECT email, name FROM customers WHERE id=$1', [customerId]);
   const customer = customerResult.rows[0];
 
-  let transporter;
-  let fromAddress;
-
+  // Option 1: Customer has their own Gmail app-password → use nodemailer
   if (profile?.gmail_app_password) {
     const appPassword = decrypt(profile.gmail_app_password, customerId);
     if (appPassword) {
-      transporter = getGmailTransporter(customer.email, appPassword);
-      fromAddress = `${customer.name} <${customer.email}>`;
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: customer.email, pass: appPassword },
+      });
+      const fromAddress = `${customer.name} <${customer.email}>`;
+      const info = await transporter.sendMail({
+        from: fromAddress, to, subject, text: body,
+        cc: cc || undefined, bcc: bcc || undefined,
+      });
+      console.log(`✉️ Email sent via customer Gmail for ${customerId}: ${info.messageId}`);
+      return { messageId: info.messageId, from: fromAddress };
     }
   }
 
-  if (!transporter) {
-    transporter = getPlatformTransporter();
-    if (!transporter) {
-      throw new Error('Email not configured. Set SMTP_HOST/SMTP_USER/SMTP_PASS env vars, or add a Gmail app password for this customer.');
+  // Option 2: Resend HTTP API (platform-level, always works on cloud)
+  const resend = getResend();
+  if (resend) {
+    const fromAddress = process.env.RESEND_FROM || 'AI Assistant <assistant@autobookai.com>';
+    const result = await resend.emails.send({
+      from: fromAddress,
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      text: body,
+      cc: cc ? (Array.isArray(cc) ? cc : [cc]) : undefined,
+      bcc: bcc ? (Array.isArray(bcc) ? bcc : [bcc]) : undefined,
+      replyTo: customer.email,
+    });
+
+    if (result.error) {
+      throw new Error(`Resend API error: ${result.error.message}`);
     }
-    fromAddress = `${customer.name} via AI Assistant <${process.env.SMTP_USER}>`;
+
+    console.log(`✉️ Email sent via Resend for customer ${customerId}: ${result.data.id}`);
+    return { messageId: result.data.id, from: fromAddress };
   }
 
-  const mailOptions = {
-    from: fromAddress,
-    to,
-    subject,
-    text: body,
-    cc: cc || undefined,
-    bcc: bcc || undefined,
-  };
-
-  const info = await transporter.sendMail(mailOptions);
-  console.log(`✉️ Email sent for customer ${customerId}: ${info.messageId}`);
-
-  return { messageId: info.messageId, from: fromAddress };
+  throw new Error('Email not configured. Set RESEND_API_KEY env var, or add a Gmail app password for this customer.');
 }
 
 module.exports = { sendEmail };
