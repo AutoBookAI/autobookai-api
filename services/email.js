@@ -13,22 +13,26 @@ const { decrypt } = require('./encryption');
  */
 
 // Platform-level transporter (fallback)
-let platformTransporter = null;
-
 function getPlatformTransporter() {
-  if (platformTransporter) return platformTransporter;
-  if (!process.env.SMTP_HOST) return null;
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) return null;
 
-  platformTransporter = nodemailer.createTransport({
+  // Use Gmail service (port 465 SSL) — more reliable on cloud platforms than STARTTLS on 587
+  if (process.env.SMTP_HOST === 'smtp.gmail.com') {
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+  }
+
+  return nodemailer.createTransport({
     host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
+    port: parseInt(process.env.SMTP_PORT || '465'),
+    secure: true,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 30000,
   });
-  return platformTransporter;
 }
 
 // Customer-specific Gmail transporter
