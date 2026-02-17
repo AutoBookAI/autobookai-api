@@ -64,7 +64,7 @@ async function sendEmail(customerId, { to, subject, body, cc, bcc }) {
   let fromAddress;
 
   if (profile?.gmail_app_password) {
-    const appPassword = decrypt(profile.gmail_app_password);
+    const appPassword = decrypt(profile.gmail_app_password, customerId);
     if (appPassword) {
       transporter = getGmailTransporter(customer.email, appPassword);
       fromAddress = `${customer.name} <${customer.email}>`;

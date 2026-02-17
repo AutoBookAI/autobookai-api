@@ -55,6 +55,36 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// ── Google Calendar OAuth callback (unauthenticated — Google redirects here) ──
+
+router.get('/calendar/callback', async (req, res) => {
+  const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+  if (req.query.error) {
+    return res.redirect(`${FRONTEND_URL}/portal/preferences?calendar=denied`);
+  }
+
+  try {
+    const state = JSON.parse(req.query.state || '{}');
+    const { customerId, nonce } = state;
+
+    if (!customerId || !nonce) {
+      return res.redirect(`${FRONTEND_URL}/portal/preferences?calendar=error`);
+    }
+
+    const { validateNonce, handleOAuthCallback } = require('../services/google-calendar');
+    if (!validateNonce(customerId, nonce)) {
+      return res.redirect(`${FRONTEND_URL}/portal/preferences?calendar=error`);
+    }
+
+    await handleOAuthCallback(req.query.code, customerId);
+    res.redirect(`${FRONTEND_URL}/portal/preferences?calendar=connected`);
+  } catch (err) {
+    console.error('Calendar OAuth callback error:', err.message);
+    res.redirect(`${FRONTEND_URL}/portal/preferences?calendar=error`);
+  }
+});
+
 // ── Protected routes ──────────────────────────────────────────────────────────
 
 router.use(customerAuth);
@@ -83,7 +113,7 @@ router.get('/profile', async (req, res) => {
               preferred_restaurants, dining_budget, preferred_airlines,
               seat_preference, cabin_class, hotel_preferences,
               loyalty_numbers, full_name, date_of_birth, passport_number,
-              preferred_contact, timezone
+              preferred_contact, timezone, gmail_app_password
        FROM customer_profiles WHERE customer_id=$1`,
       [req.customerId]
     );
@@ -95,6 +125,10 @@ router.get('/profile', async (req, res) => {
     if (profile.loyalty_numbers) profile.loyalty_numbers = decryptJSON(profile.loyalty_numbers, cid);
     if (profile.passport_number) profile.passport_number = decrypt(profile.passport_number, cid);
     if (profile.date_of_birth) profile.date_of_birth = decrypt(profile.date_of_birth, cid);
+
+    // Never expose the actual password — just indicate whether it's set
+    profile.has_gmail_app_password = !!profile.gmail_app_password;
+    delete profile.gmail_app_password;
 
     res.json(profile);
   } catch {
@@ -108,7 +142,7 @@ router.patch('/profile', async (req, res) => {
     dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
     preferred_airlines, seat_preference, cabin_class, hotel_preferences,
     loyalty_numbers, full_name, date_of_birth, passport_number, preferred_contact,
-    timezone,
+    timezone, gmail_app_password,
   } = req.body;
 
   try {
@@ -126,6 +160,7 @@ router.patch('/profile', async (req, res) => {
       ? encryptJSON(loyalty_numbers, cid) : (loyalty_numbers === '' || (Array.isArray(loyalty_numbers) && !loyalty_numbers.length) ? null : undefined);
     const encryptedPassport = passport_number ? encrypt(passport_number, cid) : (passport_number === '' ? null : undefined);
     const encryptedDOB = date_of_birth ? encrypt(date_of_birth, cid) : (date_of_birth === '' ? null : undefined);
+    const encryptedGmail = gmail_app_password ? encrypt(gmail_app_password, cid) : (gmail_app_password === '' ? null : undefined);
 
     await pool.query(
       `UPDATE customer_profiles SET
@@ -143,13 +178,14 @@ router.patch('/profile', async (req, res) => {
          passport_number      = COALESCE($12, passport_number),
          preferred_contact    = COALESCE($13, preferred_contact),
          timezone             = COALESCE($14, timezone),
+         gmail_app_password   = COALESCE($15, gmail_app_password),
          updated_at           = NOW()
-       WHERE customer_id = $15`,
+       WHERE customer_id = $16`,
       [
         dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
         preferred_airlines, seat_preference, cabin_class, hotel_preferences,
         encryptedLoyalty, full_name, encryptedDOB, encryptedPassport, preferred_contact,
-        timezone, req.customerId,
+        timezone, encryptedGmail, req.customerId,
       ]
     );
 
@@ -224,6 +260,43 @@ router.get('/activity', async (req, res) => {
     });
   } catch {
     res.status(500).json({ error: 'Failed to fetch activity' });
+  }
+});
+
+// ── Google Calendar management ────────────────────────────────────────────────
+
+router.get('/calendar/auth-url', async (req, res) => {
+  try {
+    const { getAuthUrl } = require('../services/google-calendar');
+    const url = getAuthUrl(req.customerId);
+    res.json({ url });
+  } catch (err) {
+    console.error('Calendar auth-url error:', err.message);
+    res.status(500).json({ error: 'Failed to generate calendar auth URL' });
+  }
+});
+
+router.get('/calendar/status', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT google_calendar_token FROM customer_profiles WHERE customer_id=$1',
+      [req.customerId]
+    );
+    res.json({ connected: !!result.rows[0]?.google_calendar_token });
+  } catch {
+    res.status(500).json({ error: 'Failed to check calendar status' });
+  }
+});
+
+router.post('/calendar/disconnect', async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE customer_profiles SET google_calendar_token = NULL WHERE customer_id=$1',
+      [req.customerId]
+    );
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed to disconnect calendar' });
   }
 });
 

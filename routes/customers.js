@@ -48,7 +48,8 @@ router.get('/:id', async (req, res) => {
               preferred_restaurants, dining_budget, preferred_airlines,
               seat_preference, cabin_class, hotel_preferences,
               loyalty_numbers, full_name, date_of_birth, passport_number,
-              preferred_contact, timezone
+              preferred_contact, timezone, gmail_app_password,
+              google_calendar_token
        FROM customer_profiles WHERE customer_id = $1`,
       [req.params.id]
     );
@@ -61,6 +62,12 @@ router.get('/:id', async (req, res) => {
     if (profile.loyalty_numbers) profile.loyalty_numbers = decryptJSON(profile.loyalty_numbers, cid);
     if (profile.passport_number) profile.passport_number = decrypt(profile.passport_number, cid);
     if (profile.date_of_birth)   profile.date_of_birth   = decrypt(profile.date_of_birth, cid);
+
+    // Never expose secrets — just indicate whether they're set
+    profile.has_gmail_app_password = !!profile.gmail_app_password;
+    delete profile.gmail_app_password;
+    profile.calendar_connected = !!profile.google_calendar_token;
+    delete profile.google_calendar_token;
 
     res.json({ ...customer, profile });
   } catch (err) {
@@ -163,7 +170,7 @@ router.patch('/:id/profile', async (req, res) => {
     dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
     preferred_airlines, seat_preference, cabin_class, hotel_preferences,
     loyalty_numbers, full_name, date_of_birth, passport_number, preferred_contact,
-    timezone,
+    timezone, gmail_app_password,
   } = req.body;
 
   try {
@@ -182,6 +189,7 @@ router.patch('/:id/profile', async (req, res) => {
       ? encryptJSON(loyalty_numbers, cid) : (loyalty_numbers === '' || (Array.isArray(loyalty_numbers) && !loyalty_numbers.length) ? null : undefined);
     const encryptedPassport = passport_number ? encrypt(passport_number, cid) : (passport_number === '' ? null : undefined);
     const encryptedDOB = date_of_birth ? encrypt(date_of_birth, cid) : (date_of_birth === '' ? null : undefined);
+    const encryptedGmail = gmail_app_password ? encrypt(gmail_app_password, cid) : (gmail_app_password === '' ? null : undefined);
 
     await pool.query(
       `UPDATE customer_profiles SET
@@ -199,13 +207,14 @@ router.patch('/:id/profile', async (req, res) => {
          passport_number      = COALESCE($12, passport_number),
          preferred_contact    = COALESCE($13, preferred_contact),
          timezone             = COALESCE($14, timezone),
+         gmail_app_password   = COALESCE($15, gmail_app_password),
          updated_at           = NOW()
-       WHERE customer_id = $15`,
+       WHERE customer_id = $16`,
       [
         dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
         preferred_airlines, seat_preference, cabin_class, hotel_preferences,
         encryptedLoyalty, full_name, encryptedDOB, encryptedPassport, preferred_contact,
-        timezone, req.params.id,
+        timezone, encryptedGmail, req.params.id,
       ]
     );
 

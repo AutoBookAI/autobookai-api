@@ -9,15 +9,35 @@
  * and we store their refresh token encrypted.
  */
 
+const crypto = require('crypto');
 const { google } = require('googleapis');
 const { pool } = require('../db');
 const { decrypt, encrypt } = require('./encryption');
+
+// ── CSRF nonce management ───────────────────────────────────────────────────
+
+const calendarNonces = new Map(); // nonce → { customerId, expires }
+
+// Clean up expired nonces every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [nonce, data] of calendarNonces) {
+    if (data.expires < now) calendarNonces.delete(nonce);
+  }
+}, 5 * 60 * 1000);
+
+function validateNonce(customerId, nonce) {
+  const data = calendarNonces.get(nonce);
+  if (!data) return false;
+  calendarNonces.delete(nonce);
+  return data.customerId === customerId && data.expires > Date.now();
+}
 
 function getOAuth2Client() {
   return new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI || `${process.env.FRONTEND_URL}/api/tools/calendar/callback`
+    process.env.GOOGLE_REDIRECT_URI || `${process.env.MASTER_API_URL}/api/customer/calendar/callback`
   );
 }
 
@@ -39,7 +59,7 @@ async function getCalendarClient(customerId) {
   // Note: google_calendar_token is currently shared with openclaw password storage.
   // We'll need a dedicated column once calendar OAuth is live.
   // For now, try to parse as JSON (OAuth token) — if it fails, it's the openclaw password.
-  const decrypted = decrypt(encryptedToken);
+  const decrypted = decrypt(encryptedToken, customerId);
   let tokens;
   try {
     tokens = JSON.parse(decrypted);
@@ -57,7 +77,7 @@ async function getCalendarClient(customerId) {
     // Save refreshed token
     await pool.query(
       'UPDATE customer_profiles SET google_calendar_token=$1 WHERE customer_id=$2',
-      [encrypt(JSON.stringify(credentials)), customerId]
+      [encrypt(JSON.stringify(credentials), customerId), customerId]
     );
   }
 
@@ -68,11 +88,14 @@ async function getCalendarClient(customerId) {
  * Generate an OAuth authorization URL for a customer.
  */
 function getAuthUrl(customerId) {
+  const nonce = crypto.randomBytes(16).toString('hex');
+  calendarNonces.set(nonce, { customerId, expires: Date.now() + 5 * 60 * 1000 });
+
   const auth = getOAuth2Client();
   return auth.generateAuthUrl({
     access_type: 'offline',
     scope: ['https://www.googleapis.com/auth/calendar'],
-    state: String(customerId),
+    state: JSON.stringify({ customerId, nonce }),
     prompt: 'consent',
   });
 }
@@ -85,7 +108,7 @@ async function handleOAuthCallback(code, customerId) {
   const { tokens } = await auth.getToken(code);
   await pool.query(
     'UPDATE customer_profiles SET google_calendar_token=$1 WHERE customer_id=$2',
-    [encrypt(JSON.stringify(tokens)), customerId]
+    [encrypt(JSON.stringify(tokens), customerId), customerId]
   );
   return tokens;
 }
@@ -169,6 +192,7 @@ function addHour(isoString) {
 module.exports = {
   getAuthUrl,
   handleOAuthCallback,
+  validateNonce,
   listEvents,
   createEvent,
   deleteEvent,

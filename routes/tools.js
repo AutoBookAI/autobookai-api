@@ -17,6 +17,15 @@ const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');
 const { decrypt } = require('../services/encryption');
 
+// ── Activity logging (fire-and-forget) ──────────────────────────────────────
+
+function logActivity(customerId, eventType, description, metadata) {
+  pool.query(
+    'INSERT INTO activity_log (customer_id, event_type, description, metadata) VALUES ($1, $2, $3, $4)',
+    [customerId, eventType, description, metadata ? JSON.stringify(metadata) : null]
+  ).catch(err => console.error('Activity log error:', err.message));
+}
+
 // ── Per-customer rate limits ────────────────────────────────────────────────
 
 const emailLimit = rateLimit({
@@ -140,6 +149,7 @@ router.post('/:customerId/email', emailLimit, async (req, res) => {
   try {
     const { sendEmail } = require('../services/email');
     const result = await sendEmail(req.customerId, { to, subject, body, cc, bcc });
+    logActivity(req.customerId, 'email_sent', `Email sent to ${to}: "${subject}"`);
     res.json({ success: true, ...result });
   } catch (err) {
     console.error(`Email tool error (customer ${req.customerId}):`, err.message);
@@ -169,6 +179,7 @@ router.post('/:customerId/call', callLimit, async (req, res) => {
     if (!customerCallSids.has(req.customerId)) customerCallSids.set(req.customerId, new Set());
     customerCallSids.get(req.customerId).add(result.callSid);
 
+    logActivity(req.customerId, 'phone_call', `Call placed to ${to}`);
     res.json({ success: true, ...result });
   } catch (err) {
     console.error(`Call tool error (customer ${req.customerId}):`, err.message);
@@ -201,6 +212,7 @@ router.post('/:customerId/search', searchLimit, async (req, res) => {
   try {
     const { search } = require('../services/web-search');
     const results = await search(query, Math.min(count || 5, 10));
+    logActivity(req.customerId, 'web_search', `Searched: "${query}"`);
     res.json({ results });
   } catch (err) {
     console.error(`Search tool error:`, err.message);
@@ -224,6 +236,7 @@ router.post('/:customerId/fetch', searchLimit, async (req, res) => {
   try {
     const { fetchPage } = require('../services/web-search');
     const result = await fetchPage(url, Math.min(req.body.maxLength || 5000, 10000));
+    logActivity(req.customerId, 'web_fetch', `Fetched: ${url}`);
     res.json(result);
   } catch (err) {
     console.error(`Fetch tool error:`, err.message);
@@ -240,6 +253,7 @@ router.get('/:customerId/calendar', calendarLimit, async (req, res) => {
       maxResults: Math.min(parseInt(req.query.maxResults) || 10, 50),
       timeMin: req.query.timeMin,
     });
+    logActivity(req.customerId, 'calendar_list', `Listed ${events.length} calendar events`);
     res.json({ events });
   } catch (err) {
     console.error(`Calendar list error (customer ${req.customerId}):`, err.message);
@@ -255,6 +269,7 @@ router.post('/:customerId/calendar', calendarLimit, async (req, res) => {
   try {
     const { createEvent } = require('../services/google-calendar');
     const event = await createEvent(req.customerId, req.body);
+    logActivity(req.customerId, 'calendar_create', `Created event: "${summary}"`);
     res.json({ success: true, event });
   } catch (err) {
     console.error(`Calendar create error (customer ${req.customerId}):`, err.message);
@@ -266,6 +281,7 @@ router.delete('/:customerId/calendar/:eventId', calendarLimit, async (req, res) 
   try {
     const { deleteEvent } = require('../services/google-calendar');
     await deleteEvent(req.customerId, req.params.eventId);
+    logActivity(req.customerId, 'calendar_delete', `Deleted calendar event ${req.params.eventId}`);
     res.json({ success: true });
   } catch (err) {
     console.error(`Calendar delete error (customer ${req.customerId}):`, err.message);
