@@ -116,7 +116,22 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       return;
     }
 
-    // ── Step 3: Auto-learn whatsapp_from on first message ───────────────
+    // ── Step 3: Check daily message limit (100 messages/day) ────────────
+    const DAILY_MESSAGE_LIMIT = 100;
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM conversations
+       WHERE customer_id = $1 AND role = 'user'
+         AND created_at >= NOW() - INTERVAL '24 hours'`,
+      [customer.id]
+    );
+    const dailyCount = parseInt(countResult.rows[0].count, 10);
+    if (dailyCount >= DAILY_MESSAGE_LIMIT) {
+      await sendWhatsAppReply(toNumber, fromNumber,
+        `You've reached your daily message limit (${DAILY_MESSAGE_LIMIT} messages). Your limit resets in 24 hours. Need more? Contact support to upgrade your plan.`);
+      return;
+    }
+
+    // ── Step 4: Auto-learn whatsapp_from on first message ───────────────
     if (!customer.whatsapp_from) {
       await pool.query(
         'UPDATE customers SET whatsapp_from = $1, updated_at = NOW() WHERE id = $2',
@@ -125,7 +140,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       console.log(`📱 Learned whatsapp_from for customer ${customer.id}: ${fromNumber}`);
     }
 
-    // ── Step 4: Build message content ───────────────────────────────────
+    // ── Step 5: Build message content ───────────────────────────────────
     let messageContent = Body || '';
 
     // Handle media attachments (images, audio, documents)
@@ -151,11 +166,11 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       return;
     }
 
-    // ── Step 5: Send to shared Claude assistant ────────────────────────
+    // ── Step 6: Send to shared Claude assistant ────────────────────────
     console.log(`🤖 Sending to Claude for customer ${customer.id}`);
     const replyText = await handleMessage(customer.id, messageContent);
 
-    // ── Step 6: Send AI response back via WhatsApp ──────────────────────
+    // ── Step 7: Send AI response back via WhatsApp ──────────────────────
     // WhatsApp has a 1600 char limit per message — split if needed
     const chunks = splitMessage(replyText, 1500);
     for (const chunk of chunks) {
@@ -164,7 +179,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
 
     console.log(`✅ Replied to ${fromNumber} (customer ${customer.id}, ${chunks.length} msg${chunks.length > 1 ? 's' : ''})`);
 
-    // ── Step 7: Log to activity_log ─────────────────────────────────────
+    // ── Step 8: Log to activity_log ─────────────────────────────────────
     await pool.query(
       `INSERT INTO activity_log (customer_id, event_type, description, metadata)
        VALUES ($1, 'whatsapp_message', $2, $3)`,
