@@ -106,6 +106,15 @@ async function initDB() {
         created_at  TIMESTAMP DEFAULT NOW()
       );
 
+      -- ── Conversation history ─────────────────────────────────────────────
+      CREATE TABLE IF NOT EXISTS conversations (
+        id          SERIAL PRIMARY KEY,
+        customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+        role        VARCHAR(20) NOT NULL,
+        content     TEXT NOT NULL,
+        created_at  TIMESTAMP DEFAULT NOW()
+      );
+
       -- ── Stripe webhook idempotency ──────────────────────────────────────
       CREATE TABLE IF NOT EXISTS processed_stripe_events (
         event_id     VARCHAR(255) PRIMARY KEY,
@@ -130,6 +139,7 @@ async function initDB() {
       CREATE INDEX IF NOT EXISTS idx_customers_whatsapp_to ON customers(whatsapp_to);
       CREATE INDEX IF NOT EXISTS idx_customers_stripe_sub_id ON customers(stripe_subscription_id);
       CREATE INDEX IF NOT EXISTS idx_activity_log_customer_id ON activity_log(customer_id);
+      CREATE INDEX IF NOT EXISTS idx_conversations_customer_id ON conversations(customer_id);
     `);
 
     console.log('✅ Database ready');

@@ -1,81 +1,6 @@
-const axios = require('axios');
-
 /**
- * Send customer profile data to their OpenClaw instance so it can use
- * it as persistent memory / context for all conversations.
- *
- * OpenClaw stores this in its local memory system so Claude always
- * knows the customer's preferences, loyalty numbers, etc.
- */
-async function syncProfileToOpenClaw(serviceUrl, setupPassword, profile) {
-  if (!serviceUrl) throw new Error('No service URL for this customer');
-
-  // Build a structured memory document OpenClaw will store
-  const memoryContent = buildMemoryDocument(profile);
-
-  try {
-    // OpenClaw has a REST API for injecting memories/context
-    await axios.post(
-      `${serviceUrl}/api/memory`,
-      {
-        key: 'customer_profile',
-        content: memoryContent,
-        persistent: true,
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${setupPassword}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 10000,
-      }
-    );
-    console.log(`✅ Profile synced to OpenClaw at ${serviceUrl}`);
-  } catch (err) {
-    console.error('Failed to sync profile to OpenClaw:', err.message);
-    // Non-fatal — OpenClaw will still work, just without pre-loaded profile
-  }
-}
-
-/**
- * Send a message directly to a customer's OpenClaw instance
- * (used for onboarding messages, admin notifications, etc.)
- */
-async function sendMessageToOpenClaw(serviceUrl, setupPassword, message) {
-  try {
-    const response = await axios.post(
-      `${serviceUrl}/api/message`,
-      { content: message },
-      {
-        headers: {
-          'Authorization': `Bearer ${setupPassword}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 60000,
-      }
-    );
-    return response.data;
-  } catch (err) {
-    console.error('Failed to send message to OpenClaw:', err.message);
-    throw err;
-  }
-}
-
-/**
- * Check if a customer's OpenClaw instance is healthy
- */
-async function checkOpenClawHealth(serviceUrl) {
-  try {
-    const response = await axios.get(`${serviceUrl}/health`, { timeout: 5000 });
-    return response.status === 200;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Build a structured memory document from the customer's profile
- * This is what OpenClaw/Claude will use to personalise all responses
+ * Build a structured memory document from the customer's profile.
+ * Used by services/assistant.js to inject profile into Claude's system prompt.
  */
 function buildMemoryDocument(profile) {
   const sections = [];
@@ -138,4 +63,4 @@ function buildMemoryDocument(profile) {
   return `=== PERSONAL AI ASSISTANT PROFILE ===\n\n${sections.join('\n\n')}\n\n=== END PROFILE ===\n\nAlways use this profile to personalise responses and make bookings. Never share this information with third parties.`;
 }
 
-module.exports = { syncProfileToOpenClaw, sendMessageToOpenClaw, checkOpenClawHealth };
+module.exports = { buildMemoryDocument };

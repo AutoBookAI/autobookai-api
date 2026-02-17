@@ -1,9 +1,6 @@
 const router = require('express').Router();
-const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { pool } = require('../db');
-const { encrypt } = require('../services/encryption');
-const { provisionOpenClawInstance } = require('../services/railway');
 
 router.post('/', async (req, res) => {
   const sig = req.headers['stripe-signature'];
@@ -70,36 +67,11 @@ router.post('/', async (req, res) => {
             );
             console.log(`📱 Assigned number ${whatsappTo} to customer ${customerId}`);
 
-            // 3. Provision OpenClaw (async — don't block webhook response)
-            const openclawPassword = crypto.randomBytes(16).toString('hex');
-            provisionOpenClawInstance({
-              customerId: parseInt(customerId),
-              customerName: customer.name,
-              anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-              twilioAccountSid: process.env.TWILIO_ACCOUNT_SID,
-              twilioAuthToken: process.env.TWILIO_AUTH_TOKEN,
-              whatsappNumber: whatsappTo,
-              setupPassword: openclawPassword,
-            }).then(async ({ serviceId, serviceUrl }) => {
-              await pool.query(
-                `UPDATE customers SET
-                   railway_service_id=$1, railway_service_url=$2,
-                   openclaw_status='active', updated_at=NOW()
-                 WHERE id=$3`,
-                [serviceId, serviceUrl, customerId]
-              );
-              await pool.query(
-                'UPDATE customer_profiles SET openclaw_password=$1 WHERE customer_id=$2',
-                [encrypt(openclawPassword, parseInt(customerId)), parseInt(customerId)]
-              );
-              console.log(`✅ OpenClaw provisioned for customer ${customerId}`);
-            }).catch(err => {
-              console.error(`❌ OpenClaw provisioning failed for customer ${customerId}:`, err.message);
-              pool.query(
-                "UPDATE customers SET openclaw_status='error' WHERE id=$1",
-                [customerId]
-              );
-            });
+            // 3. Mark AI assistant as active (shared Claude handler, no provisioning needed)
+            await pool.query(
+              "UPDATE customers SET openclaw_status='active', updated_at=NOW() WHERE id=$1",
+              [customerId]
+            );
           } else {
             console.error(`🚨 CRITICAL: No WhatsApp numbers available for customer ${customerId} — number pool empty!`);
           }

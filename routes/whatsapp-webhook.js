@@ -15,8 +15,7 @@
 const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');
-const { decrypt } = require('../services/encryption');
-const { sendMessageToOpenClaw } = require('../services/openclaw');
+const { handleMessage } = require('../services/assistant');
 
 // ── Rate limiting — keyed on sender phone number, not IP ──────────────────
 // Twilio sends all webhooks from shared IPs, so IP-based limiting would
@@ -95,11 +94,8 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
   try {
     // ── Step 1: Look up customer by their assigned Twilio number ────────
     const custResult = await pool.query(
-      `SELECT c.id, c.name, c.railway_service_url, c.subscription_status,
-              c.openclaw_status, c.whatsapp_from,
-              cp.openclaw_password
+      `SELECT c.id, c.name, c.subscription_status, c.whatsapp_from
        FROM customers c
-       JOIN customer_profiles cp ON cp.customer_id = c.id
        WHERE c.whatsapp_to = $1`,
       [toNumber]
     );
@@ -117,12 +113,6 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
     if (customer.subscription_status !== 'active') {
       await sendWhatsAppReply(toNumber, fromNumber,
         `Your subscription is not currently active. Please visit ${process.env.FRONTEND_URL}/portal to reactivate.`);
-      return;
-    }
-
-    if (customer.openclaw_status !== 'active' || !customer.railway_service_url) {
-      await sendWhatsAppReply(toNumber, fromNumber,
-        'Your AI assistant is still being set up. Please try again in a few minutes.');
       return;
     }
 
@@ -161,28 +151,11 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       return;
     }
 
-    // ── Step 5: Decrypt OpenClaw password and forward message ───────────
-    const openclawPassword = decrypt(customer.openclaw_password, customer.id);
-    if (!openclawPassword) {
-      console.error(`Cannot decrypt OpenClaw password for customer ${customer.id}`);
-      await sendWhatsAppReply(toNumber, fromNumber,
-        'Sorry, there was a configuration error. Please contact support.');
-      return;
-    }
-
-    console.log(`🤖 Forwarding to OpenClaw for customer ${customer.id}`);
-    const aiResponse = await sendMessageToOpenClaw(
-      customer.railway_service_url,
-      openclawPassword,
-      messageContent
-    );
+    // ── Step 5: Send to shared Claude assistant ────────────────────────
+    console.log(`🤖 Sending to Claude for customer ${customer.id}`);
+    const replyText = await handleMessage(customer.id, messageContent);
 
     // ── Step 6: Send AI response back via WhatsApp ──────────────────────
-    const replyText = aiResponse?.response
-      || aiResponse?.content
-      || aiResponse?.message
-      || 'I received your message but had trouble generating a response. Please try again.';
-
     // WhatsApp has a 1600 char limit per message — split if needed
     const chunks = splitMessage(replyText, 1500);
     for (const chunk of chunks) {

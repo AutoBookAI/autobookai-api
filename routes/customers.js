@@ -1,10 +1,7 @@
 const router = require('express').Router();
-const crypto = require('crypto');
 const { pool } = require('../db');
 const auth = require('../middleware/auth');
 const { encrypt, decrypt, encryptJSON, decryptJSON } = require('../services/encryption');
-const { provisionOpenClawInstance } = require('../services/railway');
-const { syncProfileToOpenClaw } = require('../services/openclaw');
 
 router.use(auth);
 
@@ -91,9 +88,6 @@ router.post('/', async (req, res) => {
     );
     const whatsappTo = numResult.rows[0]?.number || null;
 
-    // Generate a secure random password for this customer's OpenClaw UI
-    const openclawPassword = crypto.randomBytes(16).toString('hex');
-
     // Create customer record
     const cResult = await client.query(
       `INSERT INTO customers
@@ -120,40 +114,15 @@ router.post('/', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Provision OpenClaw asynchronously (takes ~30s, don't block the response)
+    // Mark AI assistant as active (shared Claude handler, no provisioning needed)
     if (whatsappTo) {
-      provisionOpenClawInstance({
-        customerId:       customer.id,
-        customerName:     name,
-        anthropicApiKey:  process.env.ANTHROPIC_API_KEY,
-        twilioAccountSid: process.env.TWILIO_ACCOUNT_SID,
-        twilioAuthToken:  process.env.TWILIO_AUTH_TOKEN,
-        whatsappNumber:   whatsappTo,
-        setupPassword:    openclawPassword,
-      }).then(async ({ serviceId, serviceUrl }) => {
-        await pool.query(
-          `UPDATE customers SET
-             railway_service_id=$1, railway_service_url=$2,
-             openclaw_status='active', updated_at=NOW()
-           WHERE id=$3`,
-          [serviceId, serviceUrl, customer.id]
-        );
-        // Store the password encrypted with per-customer key
-        await pool.query(
-          'UPDATE customer_profiles SET openclaw_password=$1 WHERE customer_id=$2',
-          [encrypt(openclawPassword, customer.id), customer.id]
-        );
-        console.log(`✅ OpenClaw provisioned for ${name}`);
-      }).catch(err => {
-        console.error(`❌ OpenClaw provisioning failed for ${name}:`, err.message);
-        pool.query(
-          "UPDATE customers SET openclaw_status='error' WHERE id=$1",
-          [customer.id]
-        );
-      });
+      await pool.query(
+        "UPDATE customers SET openclaw_status='active', updated_at=NOW() WHERE id=$1",
+        [customer.id]
+      );
     }
 
-    res.json({ ...customer, message: 'Customer created. AI agent is being provisioned (~30s).' });
+    res.json({ ...customer, message: 'Customer created. AI assistant is ready.' });
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
@@ -176,11 +145,10 @@ router.patch('/:id/profile', async (req, res) => {
   try {
     // Verify ownership
     const check = await pool.query(
-      'SELECT id, railway_service_url FROM customers WHERE id=$1 AND admin_id=$2',
+      'SELECT id FROM customers WHERE id=$1 AND admin_id=$2',
       [req.params.id, req.adminId]
     );
     if (!check.rows.length) return res.status(404).json({ error: 'Not found' });
-    const serviceUrl = check.rows[0].railway_service_url;
 
     // Encrypt sensitive fields using per-customer key
     // Empty string "" → null to allow clearing via COALESCE
@@ -218,24 +186,6 @@ router.patch('/:id/profile', async (req, res) => {
       ]
     );
 
-    // Push updated profile to their OpenClaw instance so Claude knows the new prefs
-    // SECURITY: Fetch the OpenClaw password from DB, never from the request body
-    if (serviceUrl) {
-      const profileResult = await pool.query(
-        `SELECT dietary_restrictions, cuisine_preferences, preferred_restaurants,
-                dining_budget, preferred_airlines, seat_preference, cabin_class,
-                hotel_preferences, loyalty_numbers, full_name, preferred_contact,
-                openclaw_password
-         FROM customer_profiles WHERE customer_id=$1`, [req.params.id]
-      );
-      const profile = profileResult.rows[0] || {};
-      if (profile.loyalty_numbers) profile.loyalty_numbers = decryptJSON(profile.loyalty_numbers, cid);
-      const openclawPwd = decrypt(profile.openclaw_password, cid);
-      if (openclawPwd) {
-        syncProfileToOpenClaw(serviceUrl, openclawPwd, profile).catch(console.error);
-      }
-    }
-
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -243,90 +193,14 @@ router.patch('/:id/profile', async (req, res) => {
   }
 });
 
-// POST /api/customers/:id/reprovision — retry failed OpenClaw deployment
-router.post('/:id/reprovision', async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT id, name, whatsapp_to, openclaw_status, railway_service_id, railway_service_url
-       FROM customers WHERE id=$1 AND admin_id=$2`,
-      [req.params.id, req.adminId]
-    );
-    if (!result.rows.length) return res.status(404).json({ error: 'Not found' });
-
-    const customer = result.rows[0];
-    if (customer.openclaw_status === 'active' && customer.railway_service_url) {
-      return res.status(400).json({ error: 'AI agent is already active' });
-    }
-
-    // If there's an existing broken service, tear it down first
-    if (customer.railway_service_id) {
-      const { deprovisionOpenClawInstance } = require('../services/railway');
-      await deprovisionOpenClawInstance(customer.railway_service_id).catch(() => {});
-    }
-
-    // Mark as pending
-    await pool.query(
-      "UPDATE customers SET openclaw_status='pending', railway_service_id=NULL, railway_service_url=NULL WHERE id=$1",
-      [customer.id]
-    );
-
-    // Reprovision
-    const openclawPassword = require('crypto').randomBytes(16).toString('hex');
-    const whatsappNumber = customer.whatsapp_to;
-
-    if (!whatsappNumber) {
-      return res.status(400).json({ error: 'No WhatsApp number assigned. Assign one first.' });
-    }
-
-    provisionOpenClawInstance({
-      customerId:       customer.id,
-      customerName:     customer.name,
-      anthropicApiKey:  process.env.ANTHROPIC_API_KEY,
-      twilioAccountSid: process.env.TWILIO_ACCOUNT_SID,
-      twilioAuthToken:  process.env.TWILIO_AUTH_TOKEN,
-      whatsappNumber:   whatsappNumber,
-      setupPassword:    openclawPassword,
-    }).then(async ({ serviceId, serviceUrl }) => {
-      await pool.query(
-        `UPDATE customers SET
-           railway_service_id=$1, railway_service_url=$2,
-           openclaw_status='active', updated_at=NOW()
-         WHERE id=$3`,
-        [serviceId, serviceUrl, customer.id]
-      );
-      await pool.query(
-        'UPDATE customer_profiles SET openclaw_password=$1 WHERE customer_id=$2',
-        [encrypt(openclawPassword, customer.id), customer.id]
-      );
-      console.log(`✅ OpenClaw reprovisioned for ${customer.name}`);
-    }).catch(err => {
-      console.error(`❌ OpenClaw reprovisioning failed for ${customer.name}:`, err.message);
-      pool.query(
-        "UPDATE customers SET openclaw_status='error' WHERE id=$1",
-        [customer.id]
-      );
-    });
-
-    res.json({ message: 'AI agent reprovisioning started. This takes about 30-60 seconds.' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to reprovision' });
-  }
-});
-
 // DELETE /api/customers/:id
 router.delete('/:id', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT railway_service_id FROM customers WHERE id=$1 AND admin_id=$2',
+      'SELECT id FROM customers WHERE id=$1 AND admin_id=$2',
       [req.params.id, req.adminId]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Not found' });
-
-    const { deprovisionOpenClawInstance } = require('../services/railway');
-    if (result.rows[0].railway_service_id) {
-      deprovisionOpenClawInstance(result.rows[0].railway_service_id).catch(console.error);
-    }
 
     await pool.query(
       'UPDATE whatsapp_numbers SET is_assigned=FALSE, customer_id=NULL WHERE customer_id=$1',
