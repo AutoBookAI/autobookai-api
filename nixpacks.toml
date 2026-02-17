@@ -1,7 +1,8 @@
 # Chromium system dependencies for Puppeteer on Railway
+# Use aptPkgs (not nixPkgs) to avoid overriding the default Node.js nix setup
 [phases.setup]
-nixPkgs = ["chromium", "nss", "atk", "at-spi2-atk", "cups", "libdrm", "libxkbcommon", "mesa", "pango", "cairo", "glib"]
+aptPkgs = ["chromium", "libnss3", "libatk1.0-0", "libatk-bridge2.0-0", "libcups2", "libgbm1", "libasound2t64", "libpangocairo-1.0-0", "libxss1", "libgtk-3-0", "libxshmfence1", "libglu1"]
 
-# Skip Puppeteer's bundled Chromium download — use system Chromium from nix
+# Skip Puppeteer's bundled Chromium download — use system Chromium from apt
 [variables]
 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
