@@ -92,16 +92,23 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
   console.log(`📨 WhatsApp from ${fromNumber} to ${toNumber}: "${(Body || '').slice(0, 80)}"`);
 
   try {
-    // ── Step 1: Look up customer by their assigned Twilio number ────────
+    // ── Step 1: Look up customer ─────────────────────────────────────
+    // Sandbox mode: all messages go to the shared sandbox number, so we
+    // look up the customer by their personal phone (From) which is stored
+    // in whatsapp_to. Production mode: each customer has a dedicated
+    // Twilio number, so we look up by the Twilio number (To).
+    const sandboxNumber = process.env.TWILIO_WHATSAPP_NUMBER;
+    const isSandbox = sandboxNumber && toNumber === sandboxNumber;
+
     const custResult = await pool.query(
       `SELECT c.id, c.name, c.subscription_status, c.whatsapp_from
        FROM customers c
        WHERE c.whatsapp_to = $1`,
-      [toNumber]
+      [isSandbox ? fromNumber : toNumber]
     );
 
     if (!custResult.rows.length) {
-      console.warn(`No customer found for number ${toNumber}`);
+      console.warn(`No customer found for ${isSandbox ? 'sender' : 'number'} ${isSandbox ? fromNumber : toNumber}`);
       await sendWhatsAppReply(toNumber, fromNumber,
         'Sorry, this number is not currently active. Please contact support.');
       return;
