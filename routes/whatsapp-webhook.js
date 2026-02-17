@@ -117,7 +117,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
     }
 
     // ── Step 3: Check daily message limit (100 messages/day) ────────────
-    const DAILY_MESSAGE_LIMIT = 100;
+    const DAILY_MESSAGE_LIMIT = 30;
     const countResult = await pool.query(
       `SELECT COUNT(*) FROM conversations
        WHERE customer_id = $1 AND role = 'user'
