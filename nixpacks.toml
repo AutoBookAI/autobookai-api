@@ -1,3 +1,7 @@
 # Chromium system dependencies for Puppeteer on Railway
 [phases.setup]
 nixPkgs = ["chromium", "nss", "atk", "at-spi2-atk", "cups", "libdrm", "libxkbcommon", "mesa", "pango", "cairo", "glib"]
+
+# Skip Puppeteer's bundled Chromium download — use system Chromium from nix
+[phases.install]
+cmds = ["PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm ci"]
