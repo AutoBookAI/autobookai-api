@@ -404,6 +404,7 @@ async function handleMessage(customerId, userMessage) {
       const toolResults = [];
       for (const block of assistantContent) {
         if (block.type === 'tool_use') {
+          console.log(`🔧 Tool call: ${block.name} for customer ${customerId}`, JSON.stringify(block.input).slice(0, 200));
           let result;
           try {
             if (block.name === 'browser_action') {
@@ -425,7 +426,7 @@ async function handleMessage(customerId, userMessage) {
               result = await executeTool(customerId, block.name, block.input);
             }
           } catch (err) {
-            console.error(`Tool ${block.name} failed for customer ${customerId}:`, err.message);
+            console.error(`❌ Tool ${block.name} FAILED for customer ${customerId}:`, err.message);
             toolResults.push({
               type: 'tool_result',
               tool_use_id: block.id,
@@ -435,6 +436,7 @@ async function handleMessage(customerId, userMessage) {
             continue;
           }
 
+          console.log(`✅ Tool ${block.name} succeeded for customer ${customerId}`);
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
