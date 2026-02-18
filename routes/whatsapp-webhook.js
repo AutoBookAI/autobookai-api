@@ -123,19 +123,23 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       return;
     }
 
-    // ── Step 3: Check daily message limit (100 messages/day) ────────────
+    // ── Step 3: Check daily message limit ──────────────────────────────
     const DAILY_MESSAGE_LIMIT = 30;
-    const countResult = await pool.query(
-      `SELECT COUNT(*) FROM conversations
-       WHERE customer_id = $1 AND role = 'user'
-         AND created_at >= NOW() - INTERVAL '24 hours'`,
-      [customer.id]
-    );
-    const dailyCount = parseInt(countResult.rows[0].count, 10);
-    if (dailyCount >= DAILY_MESSAGE_LIMIT) {
-      await sendWhatsAppReply(toNumber, fromNumber,
-        `You've reached your daily message limit (${DAILY_MESSAGE_LIMIT} messages). Your limit resets in 24 hours. Need more? Contact support to upgrade your plan.`);
-      return;
+    const UNLIMITED_CUSTOMER_IDS = [1]; // Platform owner — no daily limit
+
+    if (!UNLIMITED_CUSTOMER_IDS.includes(customer.id)) {
+      const countResult = await pool.query(
+        `SELECT COUNT(*) FROM conversations
+         WHERE customer_id = $1 AND role = 'user'
+           AND created_at >= NOW() - INTERVAL '24 hours'`,
+        [customer.id]
+      );
+      const dailyCount = parseInt(countResult.rows[0].count, 10);
+      if (dailyCount >= DAILY_MESSAGE_LIMIT) {
+        await sendWhatsAppReply(toNumber, fromNumber,
+          `You've reached your daily message limit (${DAILY_MESSAGE_LIMIT} messages). Your limit resets in 24 hours. Need more? Contact support to upgrade your plan.`);
+        return;
+      }
     }
 
     // ── Step 4: Auto-learn whatsapp_from on first message ───────────────
