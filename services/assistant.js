@@ -155,9 +155,7 @@ async function executeTool(customerId, toolName, toolInput) {
 
     case 'make_phone_call': {
       const { makeCall } = require('./twilio-voice');
-      const custResult = await pool.query('SELECT whatsapp_to FROM customers WHERE id=$1', [customerId]);
-      const from = custResult.rows[0]?.whatsapp_to;
-      const result = await makeCall({ to: toolInput.to, message: toolInput.message, from, voice: toolInput.voice });
+      const result = await makeCall({ to: toolInput.to, message: toolInput.message, voice: toolInput.voice });
       logActivity(customerId, 'phone_call', `Call placed to ${toolInput.to}`);
       return result;
     }
