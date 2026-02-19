@@ -115,6 +115,16 @@ async function initDB() {
         created_at  TIMESTAMP DEFAULT NOW()
       );
 
+      -- ── Connected apps (encrypted credentials for AI to use) ──────────
+      CREATE TABLE IF NOT EXISTS connected_apps (
+        id          SERIAL PRIMARY KEY,
+        customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+        app_name    VARCHAR(100) NOT NULL,
+        credentials TEXT NOT NULL,  -- AES-256 encrypted JSON {username, password}
+        connected_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(customer_id, app_name)
+      );
+
       -- ── Stripe webhook idempotency ──────────────────────────────────────
       CREATE TABLE IF NOT EXISTS processed_stripe_events (
         event_id     VARCHAR(255) PRIMARY KEY,

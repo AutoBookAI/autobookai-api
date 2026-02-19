@@ -50,6 +50,7 @@ app.use('/api/customer/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }))
 app.use('/api',                rateLimit({ windowMs: 15 * 60 * 1000, max: 300 })); // General
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+app.use('/api/auth/social', require('./routes/social-auth')); // Social OAuth (Google, FB, etc.)
 app.use('/api/auth',      require('./routes/auth'));
 app.use('/api/signup',    require('./routes/signup'));   // Public self-signup
 app.use('/api/customers', require('./routes/customers'));

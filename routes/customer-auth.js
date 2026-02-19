@@ -17,7 +17,6 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { pool } = require('../db');
 const customerAuth = require('../middleware/customerAuth');
 const { encrypt, decrypt, encryptJSON, decryptJSON } = require('../services/encryption');
-const { syncProfileToOpenClaw } = require('../services/openclaw');
 
 // ── Login ─────────────────────────────────────────────────────────────────────
 
@@ -89,6 +88,9 @@ router.get('/calendar/callback', async (req, res) => {
 
 router.use(customerAuth);
 
+// Connected apps sub-router (needs customerAuth)
+router.use('/apps', require('./connected-apps'));
+
 // GET /api/customer/me — safe fields only
 router.get('/me', async (req, res) => {
   try {
@@ -147,11 +149,10 @@ router.patch('/profile', async (req, res) => {
 
   try {
     const check = await pool.query(
-      'SELECT id, railway_service_url FROM customers WHERE id=$1',
+      'SELECT id FROM customers WHERE id=$1',
       [req.customerId]
     );
     if (!check.rows.length) return res.status(404).json({ error: 'Not found' });
-    const serviceUrl = check.rows[0].railway_service_url;
 
     // Encrypt sensitive fields with per-customer key
     // Empty string "" → null to allow clearing via COALESCE
@@ -188,23 +189,6 @@ router.patch('/profile', async (req, res) => {
         timezone, encryptedGmail, req.customerId,
       ]
     );
-
-    // Sync updated profile to their OpenClaw AI instance
-    if (serviceUrl) {
-      const profileResult = await pool.query(
-        `SELECT dietary_restrictions, cuisine_preferences, preferred_restaurants,
-                dining_budget, preferred_airlines, seat_preference, cabin_class,
-                hotel_preferences, loyalty_numbers, full_name, preferred_contact,
-                openclaw_password
-         FROM customer_profiles WHERE customer_id=$1`, [req.customerId]
-      );
-      const profile = profileResult.rows[0] || {};
-      if (profile.loyalty_numbers) profile.loyalty_numbers = decryptJSON(profile.loyalty_numbers, cid);
-      const openclawPwd = decrypt(profile.openclaw_password, cid);
-      if (openclawPwd) {
-        syncProfileToOpenClaw(serviceUrl, openclawPwd, profile).catch(console.error);
-      }
-    }
 
     res.json({ success: true });
   } catch (err) {

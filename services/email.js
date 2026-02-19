@@ -62,7 +62,7 @@ async function sendEmail(customerId, { to, subject, body, cc, bcc }) {
   // Option 2: Resend HTTP API (platform-level, always works on cloud)
   const resend = getResend();
   if (resend) {
-    const fromAddress = process.env.RESEND_FROM || 'AI Assistant <assistant@autobookai.com>';
+    const fromAddress = process.env.RESEND_FROM || 'Kova <assistant@kova.ai>';
     const result = await resend.emails.send({
       from: fromAddress,
       to: Array.isArray(to) ? to : [to],

@@ -101,7 +101,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
     const isSandbox = sandboxNumber && toNumber === sandboxNumber;
 
     const custResult = await pool.query(
-      `SELECT c.id, c.name, c.subscription_status, c.whatsapp_from
+      `SELECT c.id, c.name, c.subscription_status, c.whatsapp_from, c.plan
        FROM customers c
        WHERE c.whatsapp_to = $1`,
       [isSandbox ? fromNumber : toNumber]
@@ -124,10 +124,11 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
     }
 
     // ── Step 3: Check daily message limit ──────────────────────────────
-    const DAILY_MESSAGE_LIMIT = 30;
+    const PLAN_LIMITS = { pro: 100, assistant: 30 };
     const UNLIMITED_CUSTOMER_IDS = [1]; // Platform owner — no daily limit
 
     if (!UNLIMITED_CUSTOMER_IDS.includes(customer.id)) {
+      const dailyLimit = PLAN_LIMITS[customer.plan] || 30;
       const countResult = await pool.query(
         `SELECT COUNT(*) FROM conversations
          WHERE customer_id = $1 AND role = 'user'
@@ -135,9 +136,10 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
         [customer.id]
       );
       const dailyCount = parseInt(countResult.rows[0].count, 10);
-      if (dailyCount >= DAILY_MESSAGE_LIMIT) {
+      if (dailyCount >= dailyLimit) {
+        const upgradeHint = customer.plan !== 'pro' ? ' Upgrade to Kova Pro for 100 messages/day.' : '';
         await sendWhatsAppReply(toNumber, fromNumber,
-          `You've reached your daily message limit (${DAILY_MESSAGE_LIMIT} messages). Your limit resets in 24 hours. Need more? Contact support to upgrade your plan.`);
+          `You've reached your daily message limit (${dailyLimit} messages). Your limit resets in 24 hours.${upgradeHint}`);
         return;
       }
     }

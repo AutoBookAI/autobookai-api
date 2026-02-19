@@ -13,7 +13,8 @@ const { pool } = require('../db');
  * This prevents wasting numbers and Railway resources on abandoned checkouts.
  */
 router.post('/', async (req, res) => {
-  const { name, email, password, assistant_name } = req.body;
+  const { name, email, password, assistant_name, plan } = req.body;
+  const selectedPlan = plan === 'pro' ? 'pro' : 'assistant';
 
   if (!name || !email || !password) {
     return res.status(400).json({ error: 'Name, email, and password are required' });
@@ -41,9 +42,9 @@ router.post('/', async (req, res) => {
     const cResult = await client.query(
       `INSERT INTO customers
          (admin_id, name, email, password_hash, plan)
-       VALUES (1, $1, $2, $3, 'assistant')
+       VALUES (1, $1, $2, $3, $4)
        RETURNING id, name, email`,
-      [name, email, passwordHash]
+      [name, email, passwordHash, selectedPlan]
     );
     const customer = cResult.rows[0];
 
@@ -67,14 +68,18 @@ router.post('/', async (req, res) => {
       [stripeCustomer.id, customer.id]
     );
 
+    const stripePriceId = selectedPlan === 'pro'
+      ? process.env.STRIPE_PRICE_ID_PRO
+      : process.env.STRIPE_PRICE_ID;
+
     const session = await stripe.checkout.sessions.create({
       customer: stripeCustomer.id,
       payment_method_types: ['card'],
       mode: 'subscription',
-      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+      line_items: [{ price: stripePriceId, quantity: 1 }],
       success_url: `${process.env.FRONTEND_URL}/signup/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/signup`,
-      metadata: { customer_id: String(customer.id), plan: 'assistant' },
+      metadata: { customer_id: String(customer.id), plan: selectedPlan },
     });
 
     res.json({ checkoutUrl: session.url });
