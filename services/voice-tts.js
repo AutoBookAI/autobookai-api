@@ -1,51 +1,97 @@
 /**
- * Voice TTS — OpenAI text-to-speech for ultra-realistic phone voices.
+ * Voice TTS — ElevenLabs primary, OpenAI fallback.
  *
- * Uses OpenAI's tts-1-hd model which produces near-human speech.
- * Audio is cached in-memory and served via /voice/audio/:id endpoint.
+ * Priority:
+ *   1. ElevenLabs (ELEVENLABS_API_KEY) — most human-sounding
+ *   2. OpenAI tts-1-hd (OPENAI_API_KEY) — excellent fallback
+ *   3. null → Twilio <Say> used by voice-webhook
  *
- * Requires: OPENAI_API_KEY
- *
- * Voice mapping:
- *   Female → "nova" (warm, natural conversational voice)
- *   Male   → "echo" (clear, natural male voice)
+ * ElevenLabs voices: Rachel (female), Josh (male)
+ * OpenAI voices: nova (female), echo (male)
  */
 
 const crypto = require('crypto');
 
-// In-memory audio cache — keyed by UUID, auto-cleaned every minute
+// In-memory audio cache — auto-cleaned every minute
 const audioCache = new Map();
-
 setInterval(() => {
   const now = Date.now();
   for (const [id, entry] of audioCache) {
-    if (now - entry.createdAt > 5 * 60 * 1000) {
-      audioCache.delete(id);
-    }
+    if (now - entry.createdAt > 5 * 60 * 1000) audioCache.delete(id);
   }
 }, 60 * 1000);
 
-// OpenAI TTS voices — these sound almost indistinguishable from real humans
-const VOICES = {
-  female: 'nova',   // Warm, friendly, natural female
-  male: 'echo',     // Clear, natural male
+// ElevenLabs voice IDs
+const ELEVEN_VOICES = {
+  female: '21m00Tcm4TlvDq8ikWAM', // Rachel
+  male: 'TxGEqnHWrfWFTfGW9XjX',   // Josh
 };
 
-/**
- * Generate speech audio via OpenAI TTS API.
- *
- * @param {string} text - Text to speak
- * @param {'male'|'female'} gender - Voice gender
- * @returns {string|null} Audio ID for retrieval, or null if unavailable
- */
-async function generateSpeech(text, gender = 'female') {
+// OpenAI voice names
+const OPENAI_VOICES = {
+  female: 'nova',
+  male: 'echo',
+};
+
+function storeAudio(buffer) {
+  const id = crypto.randomUUID();
+  audioCache.set(id, { buffer, createdAt: Date.now() });
+  return id;
+}
+
+// ── ElevenLabs TTS ──────────────────────────────────────────────────────────
+
+async function elevenLabsTTS(text, gender) {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  if (!apiKey) return null;
+
+  const voiceId = ELEVEN_VOICES[gender] || ELEVEN_VOICES.female;
+
+  try {
+    const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': apiKey,
+        'Content-Type': 'application/json',
+        'Accept': 'audio/mpeg',
+      },
+      body: JSON.stringify({
+        text,
+        model_id: 'eleven_turbo_v2_5',
+        voice_settings: {
+          stability: 0.4,
+          similarity_boost: 0.8,
+          style: 0.35,
+          use_speaker_boost: true,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      console.error(`ElevenLabs TTS failed: ${res.status}`);
+      return null;
+    }
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const audioId = storeAudio(buffer);
+    console.log(`🔊 ElevenLabs TTS: ${audioId} (${buffer.length}B, ${gender})`);
+    return audioId;
+  } catch (err) {
+    console.error('ElevenLabs error:', err.message);
+    return null;
+  }
+}
+
+// ── OpenAI TTS ──────────────────────────────────────────────────────────────
+
+async function openaiTTS(text, gender) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
-  const voice = VOICES[gender] || VOICES.female;
+  const voice = OPENAI_VOICES[gender] || OPENAI_VOICES.female;
 
   try {
-    const response = await fetch('https://api.openai.com/v1/audio/speech', {
+    const res = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -60,17 +106,14 @@ async function generateSpeech(text, gender = 'female') {
       }),
     });
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      console.error(`OpenAI TTS failed: ${response.status} ${response.statusText} — ${errText}`);
+    if (!res.ok) {
+      console.error(`OpenAI TTS failed: ${res.status}`);
       return null;
     }
 
-    const audioBuffer = Buffer.from(await response.arrayBuffer());
-    const audioId = crypto.randomUUID();
-    audioCache.set(audioId, { buffer: audioBuffer, createdAt: Date.now() });
-
-    console.log(`🔊 OpenAI TTS audio generated: ${audioId} (${audioBuffer.length} bytes, voice=${voice})`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const audioId = storeAudio(buffer);
+    console.log(`🔊 OpenAI TTS: ${audioId} (${buffer.length}B, voice=${voice})`);
     return audioId;
   } catch (err) {
     console.error('OpenAI TTS error:', err.message);
@@ -78,20 +121,20 @@ async function generateSpeech(text, gender = 'female') {
   }
 }
 
-/**
- * Retrieve cached audio buffer by ID.
- */
-function getAudio(audioId) {
-  const entry = audioCache.get(audioId);
-  if (!entry) return null;
-  return entry.buffer;
+// ── Public API ──────────────────────────────────────────────────────────────
+
+async function generateSpeech(text, gender = 'female') {
+  // Try ElevenLabs first, then OpenAI
+  return (await elevenLabsTTS(text, gender)) || (await openaiTTS(text, gender));
 }
 
-/**
- * Check if OpenAI TTS is configured.
- */
+function getAudio(audioId) {
+  const entry = audioCache.get(audioId);
+  return entry ? entry.buffer : null;
+}
+
 function isConfigured() {
-  return !!process.env.OPENAI_API_KEY;
+  return !!(process.env.ELEVENLABS_API_KEY || process.env.OPENAI_API_KEY);
 }
 
 module.exports = { generateSpeech, getAudio, isConfigured };

@@ -89,11 +89,16 @@ router.post('/', async (req, res) => {
       }
 
       case 'invoice.payment_failed': {
-        await pool.query(
+        const failedCust = await pool.query(
           `UPDATE customers SET subscription_status='past_due', updated_at=NOW()
-           WHERE stripe_subscription_id=$1`,
+           WHERE stripe_subscription_id=$1 RETURNING name, email`,
           [obj.subscription]
         );
+        // Send payment failed email
+        if (failedCust.rows[0]) {
+          const { sendPaymentFailedEmail } = require('../services/notifications');
+          sendPaymentFailedEmail(failedCust.rows[0].name, failedCust.rows[0].email).catch(() => {});
+        }
         break;
       }
 

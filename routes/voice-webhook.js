@@ -1,278 +1,232 @@
 /**
- * Voice Webhook — handles Twilio voice call conversation loop.
+ * Voice Webhook — Twilio voice call conversation loop.
  *
- * When the AI makes an outbound call, Twilio hits these endpoints:
+ * Endpoints:
  *   POST /voice/outbound  — Initial connect + each speech turn
- *   POST /voice/status    — Call status updates (completed, failed, etc.)
- *   GET  /audio/:id       — Serve OpenAI TTS audio clips
+ *   POST /voice/status    — Call status updates
+ *   GET  /voice/audio/:id — Serve TTS audio clips
  *
- * The conversation flow:
- *   1. Call connects → speak greeting (OpenAI TTS) → <Gather> to listen
- *   2. Person speaks → Twilio transcribes → Claude generates response → OpenAI TTS → <Gather>
- *   3. Repeat until Claude signals [END_CALL] or person hangs up
- *   4. Status callback sends WhatsApp summary to customer
+ * TTS: ElevenLabs → OpenAI tts-1-hd → Twilio <Say> fallback
+ * STT: Twilio enhanced speech recognition
+ * AI:  Claude Haiku (fast) with natural conversational prompt
  *
- * TTS: OpenAI tts-1-hd (nova/echo) → falls back to Twilio Neural2 if no OPENAI_API_KEY
+ * Features: barge-in, 1s speech timeout, natural fillers
  */
 
 const router = require('express').Router();
 const Anthropic = require('@anthropic-ai/sdk');
 const { pool } = require('../db');
 const { activeCallSessions, escapeXml } = require('../services/twilio-voice');
-const { generateSpeech, getAudio, isConfigured: openaiTtsConfigured } = require('../services/voice-tts');
+const { generateSpeech, getAudio, isConfigured: ttsConfigured } = require('../services/voice-tts');
 
 const anthropic = new Anthropic();
 
 // ── TTS helpers ──────────────────────────────────────────────────────────────
 
-/**
- * Generate TwiML speech — OpenAI TTS via <Play>, or Twilio <Say> fallback.
- */
 async function speak(text, session) {
-  if (openaiTtsConfigured()) {
+  if (ttsConfigured()) {
     const gender = session.voiceGender || 'female';
     const audioId = await generateSpeech(text, gender);
     if (audioId) {
-      const masterApiUrl = process.env.MASTER_API_URL;
-      return `<Play>${masterApiUrl}/voice/audio/${audioId}</Play>`;
+      const base = process.env.MASTER_API_URL;
+      return `<Play>${base}/voice/audio/${audioId}</Play>`;
     }
   }
-  // Fallback to Twilio TTS
-  const voice = session.voice || 'Google.en-US-Neural2-F';
-  const escaped = escapeXml(text);
-  return `<Say voice="${voice}"><speak><prosody rate="94%">${escaped}</prosody></speak></Say>`;
+  const v = session.voice || 'Google.en-US-Neural2-F';
+  return `<Say voice="${v}">${escapeXml(text)}</Say>`;
 }
 
-// Twilio <Say> for short filler/fallback phrases
-function sayQuick(text, session) {
-  const voice = session.voice || 'Google.en-US-Neural2-F';
-  return `<Say voice="${voice}">${escapeXml(text)}</Say>`;
+function say(text, session) {
+  const v = session.voice || 'Google.en-US-Neural2-F';
+  return `<Say voice="${v}">${escapeXml(text)}</Say>`;
 }
 
-// ── GET /audio/:id — Serve TTS audio clips ──────────────────────────────────
+// ── Audio endpoint ──────────────────────────────────────────────────────────
 router.get('/audio/:id', (req, res) => {
-  const buffer = getAudio(req.params.id);
-  if (!buffer) return res.sendStatus(404);
-  res.set('Content-Type', 'audio/mpeg');
-  res.set('Cache-Control', 'no-cache');
-  res.send(buffer);
+  const buf = getAudio(req.params.id);
+  if (!buf) return res.sendStatus(404);
+  res.set({ 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-cache' });
+  res.send(buf);
 });
 
-// ── POST /voice/outbound — Main conversation loop ───────────────────────────
+// ── POST /voice/outbound ────────────────────────────────────────────────────
 router.post('/outbound', async (req, res) => {
   const callId = req.query.callId;
   const session = activeCallSessions.get(callId);
 
   if (!session) {
-    console.warn(`⚠️ Voice webhook: no session for callId ${callId}`);
-    res.type('text/xml').send('<Response><Say>Sorry, something went wrong. Goodbye.</Say></Response>');
+    console.warn(`⚠️ Voice: no session for ${callId}`);
+    res.type('text/xml').send('<Response><Say>Sorry, something went wrong.</Say></Response>');
     return;
   }
 
-  const speechResult = req.body.SpeechResult;
-  const actionUrl = `/voice/outbound?callId=${encodeURIComponent(callId)}`;
+  const speech = req.body.SpeechResult;
+  const action = `/voice/outbound?callId=${encodeURIComponent(callId)}`;
 
   try {
-    if (!speechResult) {
-      // First hit — call just connected, deliver the greeting
-      console.log(`📞 Call connected (callId: ${callId}), delivering greeting`);
-      const greetingTwiml = await speak(session.initialMessage, session);
+    if (!speech) {
+      // Call just connected — deliver greeting
+      console.log(`📞 Connected (${callId})`);
+      const greeting = await speak(session.initialMessage, session);
       res.type('text/xml').send(
 `<Response>
-  ${greetingTwiml}
-  <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="auto" language="en-US" enhanced="true">
+  ${greeting}
+  <Gather input="speech" action="${action}" method="POST" speechTimeout="1" language="en-US" enhanced="true" bargeIn="true">
     <Pause length="10"/>
   </Gather>
-  ${sayQuick("Hello? I didn't catch that. Let me try once more.", session)}
-  <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="5" language="en-US" enhanced="true">
-    ${sayQuick("Are you there?", session)}
+  ${say("Hello? You still there?", session)}
+  <Gather input="speech" action="${action}" method="POST" speechTimeout="3" language="en-US" enhanced="true" bargeIn="true">
+    ${say("Are you there?", session)}
   </Gather>
-  ${sayQuick("It seems like you're not available right now. I'll let my client know. Goodbye!", session)}
-</Response>`
-      );
+  ${say("Alright, seems like you're busy. I'll let my client know. Bye!", session)}
+</Response>`);
     } else {
-      // Person spoke — add to conversation history and get AI response
-      console.log(`🎙️ Speech received (callId: ${callId}): "${speechResult}"`);
-      session.history.push({ role: 'user', content: speechResult });
+      console.log(`🎙️ Speech (${callId}): "${speech}"`);
+      session.history.push({ role: 'user', content: speech });
 
-      const aiResponse = await getVoiceAIResponse(session);
-      session.history.push({ role: 'assistant', content: aiResponse.text });
+      const ai = await getVoiceAIResponse(session);
+      session.history.push({ role: 'assistant', content: ai.text });
+      console.log(`🤖 AI (${callId}): "${ai.text}" [end=${ai.endCall}]`);
 
-      console.log(`🤖 AI response (callId: ${callId}): "${aiResponse.text}" [endCall=${aiResponse.endCall}]`);
+      const twiml = await speak(ai.text, session);
 
-      const responseTwiml = await speak(aiResponse.text, session);
-
-      if (aiResponse.endCall) {
-        res.type('text/xml').send(
-`<Response>
-  ${responseTwiml}
-</Response>`
-        );
+      if (ai.endCall) {
+        res.type('text/xml').send(`<Response>${twiml}</Response>`);
       } else {
         res.type('text/xml').send(
 `<Response>
-  ${responseTwiml}
-  <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="2" language="en-US" enhanced="true">
+  ${twiml}
+  <Gather input="speech" action="${action}" method="POST" speechTimeout="1" language="en-US" enhanced="true" bargeIn="true">
     <Pause length="10"/>
   </Gather>
-  ${sayQuick("Hey, are you still there?", session)}
-  <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="3" language="en-US" enhanced="true">
+  ${say("Hey, you still there?", session)}
+  <Gather input="speech" action="${action}" method="POST" speechTimeout="3" language="en-US" enhanced="true" bargeIn="true">
     <Pause length="5"/>
   </Gather>
-  ${sayQuick("Alright, I'll let you go. Thanks for your time! Bye.", session)}
-</Response>`
-        );
+  ${say("Alright, I'll let you go. Thanks! Bye.", session)}
+</Response>`);
       }
     }
   } catch (err) {
-    console.error(`❌ Voice webhook error (callId: ${callId}):`, err.message);
-    res.type('text/xml').send(
-      `<Response><Say>I'm sorry, I ran into a technical issue. Goodbye.</Say></Response>`
-    );
+    console.error(`❌ Voice error (${callId}):`, err.message);
+    res.type('text/xml').send('<Response><Say>Sorry, technical issue. Goodbye.</Say></Response>');
   }
 });
 
-// ── POST /voice/status — Call status updates ─────────────────────────────────
+// ── POST /voice/status ──────────────────────────────────────────────────────
 router.post('/status', async (req, res) => {
   const callId = req.query.callId;
-  const callStatus = req.body.CallStatus;
-  const callDuration = req.body.CallDuration;
-
-  console.log(`📞 Call status (callId: ${callId}): ${callStatus}, duration: ${callDuration}s`);
-
+  const status = req.body.CallStatus;
+  console.log(`📞 Status (${callId}): ${status}, ${req.body.CallDuration}s`);
   res.sendStatus(200);
 
   const session = activeCallSessions.get(callId);
   if (!session) return;
 
   try {
-    if (callStatus === 'completed' && session.history.length > 0) {
+    if (status === 'completed' && session.history.length > 0) {
       await sendCallSummary(session);
-    } else if (callStatus === 'busy' || callStatus === 'no-answer' || callStatus === 'failed') {
-      await sendCallFailureNotice(session, callStatus);
+    } else if (['busy', 'no-answer', 'failed'].includes(status)) {
+      await sendCallFailureNotice(session, status);
     }
   } catch (err) {
-    console.error(`Failed to send call notification (callId: ${callId}):`, err.message);
+    console.error(`Notification error (${callId}):`, err.message);
   } finally {
     activeCallSessions.delete(callId);
   }
 });
 
-// ── Claude voice response generator ──────────────────────────────────────────
+// ── Claude voice AI ─────────────────────────────────────────────────────────
 
 async function getVoiceAIResponse(session) {
-  const systemPrompt = `You are Kova, a real person making a phone call on behalf of your client ${session.customerName}.
+  const sys = `You are on a live phone call. Sound like a real human. You are Kova, calling on behalf of ${session.customerName}.
 
 CALL PURPOSE: ${session.purpose}
+${session.profileSummary ? `\nCLIENT INFO:\n${session.profileSummary}` : ''}
 
-${session.profileSummary ? `CLIENT INFO:\n${session.profileSummary}\n` : ''}HOW TO SPEAK:
-- Talk like a real human on a phone call — casual, warm, natural.
-- Use conversational fillers naturally: "Sure thing", "So,", "Right,", "Got it", "Yeah,", "Oh,", "Hmm,", "Alright,".
-- Start some responses with "So," or "Great," or "Oh perfect," — the way a person actually talks.
-- Add natural pauses with commas and ellipses. Say "um" or "uh" occasionally when transitioning thoughts.
-- Keep it to 1-2 sentences. This is a phone call, not an essay.
-- Sound like you're smiling. Be friendly and warm but get to the point.
-- Use contractions: "I'm", "we're", "that's", "I'll", "don't", "can't" — never stiff formal language.
-- When booking, give the client's full name for the reservation.
-- When the goal is done or they want to hang up, add [END_CALL] at the very end.
-- Only use [END_CALL] on your final goodbye. Never mid-conversation.
-- You're calling on behalf of your client. Don't mention AI unless directly asked.
+RULES:
+- Keep responses to 1 SHORT sentence. Max 15 words.
+- Sound human. Use casual words: "yeah", "sure", "got it", "oh nice", "cool", "so", "right".
+- Start with a filler sometimes: "So,", "Oh,", "Yeah,", "Sure thing,", "Got it,", "Mhm,".
+- Use contractions always: I'm, we're, that's, I'll, don't, can't, won't.
+- Never sound scripted or robotic. Talk like a friend on the phone.
+- Add "um" or "uh" very occasionally for natural flow.
+- When booking, give client's full name.
+- When done or they want to hang up, end with [END_CALL].
+- Don't say you're AI unless asked directly.
 
-EXAMPLES OF NATURAL SPEECH:
-- "Hi there! So, I'm calling on behalf of ${session.customerName} — we were hoping to book a table for tonight if you have anything available?"
-- "Oh perfect, that works great. Could we do, um, 7:30 for a party of four?"
-- "Got it, yeah that sounds good. The reservation would be under ${session.customerName}."
-- "Alright, thanks so much! We really appreciate it. Have a great evening!"`;
+EXAMPLES:
+"Hey! So, I'm calling for ${session.customerName} — got any tables open tonight?"
+"Oh perfect, yeah 7:30 works great."
+"Got it, that'll be under ${session.customerName}."
+"Awesome, thanks so much! Bye!"`;
 
-  const response = await anthropic.messages.create({
+  const r = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 150,
-    system: systemPrompt,
+    max_tokens: 80,
+    system: sys,
     messages: session.history,
   });
 
-  const text = response.content[0]?.text || "Sorry, could you say that again?";
+  const text = r.content[0]?.text || "Sorry, could you say that again?";
   const endCall = text.includes('[END_CALL]');
-
-  return {
-    text: text.replace(/\[END_CALL\]/g, '').trim(),
-    endCall,
-  };
+  return { text: text.replace(/\[END_CALL\]/g, '').trim(), endCall };
 }
 
-// ── WhatsApp call summary ────────────────────────────────────────────────────
+// ── Call summary / failure ──────────────────────────────────────────────────
 
 async function sendCallSummary(session) {
   try {
-    const transcript = session.history
-      .map(m => `${m.role === 'user' ? 'Them' : 'Kova'}: ${m.content}`)
-      .join('\n');
+    const transcript = session.history.map(m =>
+      `${m.role === 'user' ? 'Them' : 'Kova'}: ${m.content}`
+    ).join('\n');
 
     const summary = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
-      messages: [{
-        role: 'user',
-        content: `Summarize this phone call in 2-3 concise sentences. What was the outcome?\n\nCall purpose: ${session.purpose}\n\nTranscript:\n${transcript}`,
-      }],
+      max_tokens: 200,
+      messages: [{ role: 'user', content: `Summarize this call in 2 sentences. Outcome?\n\nPurpose: ${session.purpose}\n\n${transcript}` }],
     });
 
-    const summaryText = summary.content[0]?.text || 'Call completed.';
-    const whatsappMsg = `📞 Call to ${session.to} completed:\n\n${summaryText}`;
+    const text = summary.content[0]?.text || 'Call completed.';
+    const msg = `📞 Call to ${session.to} completed:\n\n${text}`;
 
     if (session.customerWhatsappFrom) {
       const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-      const fromNumber = process.env.TWILIO_WHATSAPP_NUMBER;
-      if (fromNumber) {
-        await twilio.messages.create({
-          from: `whatsapp:${fromNumber}`,
-          to: `whatsapp:${session.customerWhatsappFrom}`,
-          body: whatsappMsg,
-        });
-        console.log(`📱 Call summary sent via WhatsApp to ${session.customerWhatsappFrom}`);
+      const from = process.env.TWILIO_WHATSAPP_NUMBER;
+      if (from) {
+        await twilio.messages.create({ from: `whatsapp:${from}`, to: `whatsapp:${session.customerWhatsappFrom}`, body: msg });
+        console.log(`📱 Summary sent to ${session.customerWhatsappFrom}`);
       }
     }
 
     if (session.customerId) {
       await pool.query(
         'INSERT INTO activity_log (customer_id, event_type, description, metadata) VALUES ($1, $2, $3, $4)',
-        [session.customerId, 'voice_call_completed',
-         `Conversational call to ${session.to}`,
+        [session.customerId, 'voice_call_completed', `Call to ${session.to}`,
          JSON.stringify({ purpose: session.purpose, turns: session.history.length, transcript })]
       );
     }
-  } catch (err) {
-    console.error('Failed to send call summary:', err.message);
-  }
+  } catch (err) { console.error('Summary error:', err.message); }
 }
 
 async function sendCallFailureNotice(session, status) {
   try {
     if (!session.customerWhatsappFrom) return;
-
     const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-    const fromNumber = process.env.TWILIO_WHATSAPP_NUMBER;
-    if (!fromNumber) return;
+    const from = process.env.TWILIO_WHATSAPP_NUMBER;
+    if (!from) return;
 
-    const statusMsg = status === 'busy' ? 'The line was busy'
-      : status === 'no-answer' ? 'No one answered'
-      : 'The call could not be completed';
-
+    const reason = status === 'busy' ? 'Line was busy' : status === 'no-answer' ? 'No answer' : 'Call failed';
     await twilio.messages.create({
-      from: `whatsapp:${fromNumber}`,
-      to: `whatsapp:${session.customerWhatsappFrom}`,
-      body: `📞 Call to ${session.to}: ${statusMsg}. Would you like me to try again?`,
+      from: `whatsapp:${from}`, to: `whatsapp:${session.customerWhatsappFrom}`,
+      body: `📞 Call to ${session.to}: ${reason}. Want me to try again?`,
     });
 
     if (session.customerId) {
-      await pool.query(
-        'INSERT INTO activity_log (customer_id, event_type, description) VALUES ($1, $2, $3)',
-        [session.customerId, 'voice_call_failed', `Call to ${session.to}: ${statusMsg}`]
-      );
+      await pool.query('INSERT INTO activity_log (customer_id, event_type, description) VALUES ($1, $2, $3)',
+        [session.customerId, 'voice_call_failed', `Call to ${session.to}: ${reason}`]);
     }
-  } catch (err) {
-    console.error('Failed to send call failure notice:', err.message);
-  }
+  } catch (err) { console.error('Failure notice error:', err.message); }
 }
 
 module.exports = router;

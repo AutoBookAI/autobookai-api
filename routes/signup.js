@@ -84,6 +84,10 @@ router.post('/', async (req, res) => {
 
     res.json({ checkoutUrl: session.url });
 
+    // Send welcome email (fire-and-forget)
+    const { sendWelcomeEmail } = require('../services/notifications');
+    sendWelcomeEmail(name, email).catch(() => {});
+
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Signup error:', err);

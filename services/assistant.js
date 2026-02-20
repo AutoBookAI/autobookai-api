@@ -120,6 +120,41 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'get_weather',
+    description: 'Get the current weather for a location. Use when the customer asks about weather.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        location: { type: 'string', description: 'City name or location (e.g. "New York", "London, UK")' },
+      },
+      required: ['location'],
+    },
+  },
+  {
+    name: 'set_reminder',
+    description: 'Set a reminder that will be sent to the customer via WhatsApp at the specified time. Use when the customer says "remind me to..." or "set a reminder for..."',
+    input_schema: {
+      type: 'object',
+      properties: {
+        message:  { type: 'string', description: 'The reminder message to send' },
+        time:     { type: 'string', description: 'When to send the reminder as ISO datetime (e.g. "2026-02-20T17:00:00")' },
+      },
+      required: ['message', 'time'],
+    },
+  },
+  {
+    name: 'generate_image',
+    description: 'Generate an image from a text description using AI. Use when the customer asks to create, draw, or generate an image.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: 'Description of the image to generate' },
+        size:   { type: 'string', description: 'Image size: "1024x1024", "1792x1024", or "1024x1792"' },
+      },
+      required: ['prompt'],
+    },
+  },
+  {
     name: 'browser_action',
     description: `Control a headless browser to interact with websites. Use for tasks that require filling forms, clicking buttons, or navigating multi-step flows (booking restaurants, ordering rides, making reservations, filling out web forms).
 
@@ -215,6 +250,63 @@ async function executeTool(customerId, toolName, toolInput) {
       await deleteEvent(customerId, toolInput.eventId);
       logActivity(customerId, 'calendar_delete', `Deleted calendar event ${toolInput.eventId}`);
       return { deleted: true };
+    }
+
+    case 'get_weather': {
+      const axios = require('axios');
+      const loc = encodeURIComponent(toolInput.location);
+      const resp = await axios.get(`https://wttr.in/${loc}?format=j1`, { timeout: 5000 });
+      const cur = resp.data.current_condition?.[0] || {};
+      const area = resp.data.nearest_area?.[0] || {};
+      const areaName = area.areaName?.[0]?.value || toolInput.location;
+      const result = {
+        location: areaName,
+        temp_f: cur.temp_F,
+        temp_c: cur.temp_C,
+        feels_like_f: cur.FeelsLikeF,
+        condition: cur.weatherDesc?.[0]?.value || 'Unknown',
+        humidity: cur.humidity + '%',
+        wind_mph: cur.windspeedMiles,
+        wind_dir: cur.winddir16Point,
+      };
+      logActivity(customerId, 'weather_check', `Weather for ${areaName}: ${result.condition}, ${result.temp_f}°F`);
+      return result;
+    }
+
+    case 'set_reminder': {
+      const reminderTime = new Date(toolInput.time);
+      if (isNaN(reminderTime.getTime())) throw new Error('Invalid time format');
+      await pool.query(
+        `INSERT INTO activity_log (customer_id, event_type, description, metadata)
+         VALUES ($1, 'reminder_scheduled', $2, $3)`,
+        [customerId, `Reminder: ${toolInput.message}`,
+         JSON.stringify({ remind_at: toolInput.time, message: toolInput.message, sent: false })]
+      );
+      // Schedule the actual reminder
+      const { scheduleReminder } = require('./reminders');
+      scheduleReminder(customerId, toolInput.message, reminderTime);
+      return { scheduled: true, time: toolInput.time, message: toolInput.message };
+    }
+
+    case 'generate_image': {
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) throw new Error('Image generation not configured (OPENAI_API_KEY required)');
+      const resp = await fetch('https://api.openai.com/v1/images/generations', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'dall-e-3',
+          prompt: toolInput.prompt,
+          n: 1,
+          size: toolInput.size || '1024x1024',
+        }),
+      });
+      if (!resp.ok) throw new Error(`Image generation failed: ${resp.status}`);
+      const data = await resp.json();
+      const imageUrl = data.data?.[0]?.url;
+      if (!imageUrl) throw new Error('No image URL returned');
+      logActivity(customerId, 'image_generated', `Generated image: "${toolInput.prompt}"`);
+      return { imageUrl, prompt: toolInput.prompt };
     }
 
     case 'send_text_message': {
@@ -315,6 +407,9 @@ You have real, working tools. You MUST use them — NEVER just describe what you
 - EMAILS: When the customer asks you to send an email, you MUST use the send_email tool. Do NOT just describe the email — actually send it.
 - TEXT MESSAGES: When the customer asks you to text someone, you MUST use the send_text_message tool. Format phone numbers in E.164 format (e.g. +14155551234). No confirmation needed.
 - WEB SEARCH: When you need to look something up, use the web_search tool. Don't make up information.
+- WEATHER: When asked about weather, use the get_weather tool. Don't guess.
+- REMINDERS: When asked to set a reminder, use the set_reminder tool with an ISO datetime.
+- IMAGES: When asked to create/generate/draw an image, use the generate_image tool.
 
 If a customer says "call +1234567890" or "text +1234567890 hey what's up", your response MUST contain a tool_use block. Text-only responses to tool requests are WRONG.
 
