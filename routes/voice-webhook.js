@@ -53,8 +53,20 @@ function gather(action, session) {
   return `<Gather input="speech" action="${action}" method="POST" speechTimeout="1" timeout="3" language="en-US" enhanced="true" bargeIn="true"></Gather>`;
 }
 
+// ── Admin-only guard for diagnostic endpoints ───────────────────────────────
+function requireAdminAuth(req, res, next) {
+  const jwt = require('jsonwebtoken');
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Auth required' });
+  try {
+    const decoded = jwt.verify(header.slice(7), process.env.JWT_SECRET, { algorithms: ['HS256'] });
+    if (!decoded.adminId) return res.status(403).json({ error: 'Admin only' });
+    next();
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
+}
+
 // ── GET /voice/test-call — make a test call from WITHIN the server process ──
-router.get('/test-call', async (req, res) => {
+router.get('/test-call', requireAdminAuth, async (req, res) => {
   const to = req.query.to;
   if (!to) return res.status(400).json({ error: 'Missing ?to= parameter' });
   try {
@@ -74,7 +86,7 @@ router.get('/test-call', async (req, res) => {
 });
 
 // ── GET /voice/debug — show active sessions ─────────────────────────────────
-router.get('/debug', (req, res) => {
+router.get('/debug', requireAdminAuth, (req, res) => {
   const sessions = [];
   for (const [id, s] of activeCallSessions) {
     sessions.push({ callId: id, to: s.to, purpose: s.purpose, voice: s.voice, historyLen: s.history.length, age: Math.round((Date.now() - s.createdAt) / 1000) + 's' });
