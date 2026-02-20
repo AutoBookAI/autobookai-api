@@ -91,6 +91,9 @@ router.use(customerAuth);
 // Connected apps sub-router (needs customerAuth)
 router.use('/apps', require('./connected-apps'));
 
+// Voice cloning sub-router (needs customerAuth)
+router.use('/voice', require('./voice-clone'));
+
 // GET /api/customer/me — safe fields only
 router.get('/me', async (req, res) => {
   try {

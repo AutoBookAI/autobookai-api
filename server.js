@@ -81,6 +81,11 @@ app.get('/',       (_, res) => res.json({ service: 'WhatsApp AI Assistant API', 
 const PORT = process.env.PORT || 8080;
 initDB()
   .then(() => {
+    // Pre-generate filler audio for voice calls (non-blocking)
+    require('./services/voice-tts').initFillers().catch(err =>
+      console.warn('Filler init skipped:', err.message)
+    );
+
     const server = app.listen(PORT, () => console.log(`🚀 API running on port ${PORT}`));
 
     function shutdown(signal) {

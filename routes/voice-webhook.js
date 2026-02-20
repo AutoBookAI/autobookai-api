@@ -1,59 +1,59 @@
 /**
  * Voice Webhook — Twilio voice call conversation loop.
  *
- * Optimized for minimum latency:
- *   - Claude Haiku with max_tokens=40 for ultra-short replies
- *   - No DB calls in the hot path
- *   - speechTimeout=1, timeout=3 for fast turn-taking
+ * Architecture for minimum latency:
+ *   1. Person speaks → Twilio sends SpeechResult
+ *   2. Immediately return filler ("Got it") + <Redirect> to /voice/respond
+ *   3. Meanwhile, start Claude + TTS processing in background
+ *   4. When redirect hits /voice/respond, result may already be ready
+ *   5. Return <Play> (external TTS) or <Say> (Polly fallback)
  *
- * TTS: Amazon Polly Generative voices via Twilio <Say> (no extra API key)
+ * TTS chain: Deepgram Aura → OpenAI → ElevenLabs → Polly.Ruth-Generative
  * STT: Twilio enhanced speech recognition
- * AI:  Claude Haiku (fast, 1 short sentence max)
+ * AI:  Claude Haiku (fast, max_tokens=40, 1 short sentence)
  */
 
+const crypto = require('crypto');
 const router = require('express').Router();
 const Anthropic = require('@anthropic-ai/sdk');
 const { pool } = require('../db');
 const { activeCallSessions, escapeXml, makeCall } = require('../services/twilio-voice');
+const tts = require('../services/voice-tts');
 
 const anthropic = new Anthropic();
 
-// ── Twilio signature verification for voice webhooks ──────────────────────
+// ── Pending response promises (for filler+redirect overlap) ─────────────────
+const pendingResponses = new Map();
+
+// Clean up stale pending responses
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, p] of pendingResponses) {
+    if (now - p.createdAt > 30000) pendingResponses.delete(id);
+  }
+}, 30000);
+
+// ── Twilio signature verification ───────────────────────────────────────────
 function validateTwilioVoiceSignature(req, res, next) {
   const twilio = require('twilio');
   const authToken = process.env.TWILIO_AUTH_TOKEN;
-  if (!authToken) return next(); // Skip in dev if not configured
-
+  if (!authToken) return next();
   const baseUrl = process.env.MASTER_API_URL;
   if (!baseUrl) return next();
-
   const webhookUrl = `${baseUrl}${req.originalUrl}`;
   const signature = req.headers['x-twilio-signature'];
   if (!signature) {
     console.warn('Missing X-Twilio-Signature on voice webhook');
     return res.type('text/xml').status(403).send('<Response/>');
   }
-
-  const isValid = twilio.validateRequest(authToken, signature, webhookUrl, req.body);
-  if (!isValid) {
-    console.warn('Invalid Twilio signature on voice webhook — rejecting');
+  if (!twilio.validateRequest(authToken, signature, webhookUrl, req.body)) {
+    console.warn('Invalid Twilio signature on voice webhook');
     return res.type('text/xml').status(403).send('<Response/>');
   }
   next();
 }
 
-// ── TTS helper ───────────────────────────────────────────────────────────────
-
-function say(text, session) {
-  const v = session.voice || 'Polly.Ruth-Generative';
-  return `<Say voice="${v}"><prosody rate="95%">${escapeXml(text)}</prosody></Say>`;
-}
-
-function gather(action, session) {
-  return `<Gather input="speech" action="${action}" method="POST" speechTimeout="1" timeout="3" language="en-US" enhanced="true" bargeIn="true"></Gather>`;
-}
-
-// ── Admin-only guard for diagnostic endpoints ───────────────────────────────
+// ── Admin auth for diagnostic endpoints ─────────────────────────────────────
 function requireAdminAuth(req, res, next) {
   const jwt = require('jsonwebtoken');
   const header = req.headers.authorization;
@@ -65,7 +65,36 @@ function requireAdminAuth(req, res, next) {
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 }
 
-// ── GET /voice/test-call — make a test call from WITHIN the server process ──
+// ── TTS helpers ─────────────────────────────────────────────────────────────
+
+function sayTwiml(text, session) {
+  const v = session.voice || 'Polly.Ruth-Generative';
+  return `<Say voice="${v}"><prosody rate="93%"><break time="100ms"/>${escapeXml(text)}</prosody></Say>`;
+}
+
+function playOrSay(audioId, text, session) {
+  const masterUrl = process.env.MASTER_API_URL;
+  if (audioId && masterUrl) {
+    return `<Play>${masterUrl}/voice/audio/${audioId}</Play>`;
+  }
+  return sayTwiml(text, session);
+}
+
+function gatherTwiml(action) {
+  return `<Gather input="speech" action="${action}" method="POST" speechTimeout="1" timeout="3" language="en-US" enhanced="true" bargeIn="true"></Gather>`;
+}
+
+// ── Audio serving endpoint ──────────────────────────────────────────────────
+router.get('/audio/:id', (req, res) => {
+  const audio = tts.getAudio(req.params.id);
+  if (!audio) return res.status(404).send('Not found');
+  res.set('Content-Type', audio.contentType || 'audio/mpeg');
+  res.set('Cache-Control', 'public, max-age=300');
+  res.send(audio.buffer);
+});
+
+// ── Diagnostic endpoints (admin only) ───────────────────────────────────────
+
 router.get('/test-call', requireAdminAuth, async (req, res) => {
   const to = req.query.to;
   if (!to) return res.status(400).json({ error: 'Missing ?to= parameter' });
@@ -76,34 +105,29 @@ router.get('/test-call', requireAdminAuth, async (req, res) => {
       purpose: 'Test call to verify voice system works end-to-end',
       customerId: 1,
     });
-    console.log(`🧪 Test call initiated: ${JSON.stringify(result)}`);
-    console.log(`🧪 Active sessions: ${activeCallSessions.size}, keys: [${[...activeCallSessions.keys()].join(', ')}]`);
-    res.json({ success: true, ...result, activeSessions: activeCallSessions.size });
+    res.json({ success: true, ...result, activeSessions: activeCallSessions.size, ttsProvider: tts.getProvider() || 'twilio' });
   } catch (err) {
-    console.error('Test call failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /voice/debug — show active sessions ─────────────────────────────────
 router.get('/debug', requireAdminAuth, (req, res) => {
   const sessions = [];
   for (const [id, s] of activeCallSessions) {
     sessions.push({ callId: id, to: s.to, purpose: s.purpose, voice: s.voice, historyLen: s.history.length, age: Math.round((Date.now() - s.createdAt) / 1000) + 's' });
   }
-  res.json({ activeSessions: sessions.length, sessions });
+  res.json({ activeSessions: sessions.length, ttsProvider: tts.getProvider() || 'twilio', sessions });
 });
 
-// ── POST /voice/outbound ────────────────────────────────────────────────────
+// ── POST /voice/outbound — main Twilio webhook ─────────────────────────────
 router.post('/outbound', validateTwilioVoiceSignature, async (req, res) => {
   const callId = req.query.callId;
-  console.log(`📞 Voice webhook hit: callId=${callId}, activeSessions=${activeCallSessions.size}`);
+  console.log(`📞 Webhook: callId=${callId}, sessions=${activeCallSessions.size}`);
 
   const session = activeCallSessions.get(callId);
-
   if (!session) {
-    console.error(`❌ No session found for callId=${callId}. Active keys: [${[...activeCallSessions.keys()].join(', ')}]`);
-    res.type('text/xml').send(`<Response><Say voice="Polly.Ruth-Generative">Sorry, I couldn't connect this call. Please try again.</Say></Response>`);
+    console.error(`❌ No session for callId=${callId}`);
+    res.type('text/xml').send(`<Response><Say voice="Polly.Ruth-Generative">Sorry, I couldn't connect this call.</Say></Response>`);
     return;
   }
 
@@ -112,51 +136,109 @@ router.post('/outbound', validateTwilioVoiceSignature, async (req, res) => {
 
   try {
     if (!speech) {
-      // Call just connected — deliver greeting immediately
-      console.log(`📞 Call connected (${callId}), delivering greeting`);
+      // Call just connected — deliver greeting
+      console.log(`📞 Connected (${callId}), greeting`);
+
+      // Try external TTS for greeting
+      const greetAudioId = await tts.generateSpeech(
+        session.initialMessage, session.voiceGender, session.customVoiceId
+      ).catch(() => null);
+
       res.type('text/xml').send(
 `<Response>
-  ${say(session.initialMessage, session)}
-  ${gather(action, session)}
-  ${say("Hello?", session)}
-  ${gather(action, session)}
-  ${say("Alright, I'll let you go. Bye!", session)}
+  ${playOrSay(greetAudioId, session.initialMessage, session)}
+  ${gatherTwiml(action)}
+  ${sayTwiml("Hello?", session)}
+  ${gatherTwiml(action)}
+  ${sayTwiml("Alright, I'll let you go. Bye!", session)}
 </Response>`);
       return;
     }
 
-    // Hot path: person spoke → respond FAST
-    console.log(`🎙️ Speech (${callId}): "${speech}"`);
+    // ── HOT PATH: Person spoke → respond as fast as possible ──────────
+    console.log(`🎙️ (${callId}): "${speech}"`);
     session.history.push({ role: 'user', content: speech });
 
-    // Fire Claude request immediately (no DB calls, no delays)
-    const ai = await getVoiceAIResponse(session);
-    session.history.push({ role: 'assistant', content: ai.text });
-    console.log(`🤖 AI (${callId}): "${ai.text}" [end=${ai.endCall}]`);
+    // Start Claude + TTS processing IMMEDIATELY in background
+    const processId = crypto.randomUUID();
+    const processPromise = processVoiceResponse(session);
+    pendingResponses.set(processId, { promise: processPromise, createdAt: Date.now() });
 
-    if (ai.endCall) {
-      res.type('text/xml').send(`<Response>${say(ai.text, session)}</Response>`);
-    } else {
-      res.type('text/xml').send(
+    // Return filler INSTANTLY — person hears acknowledgment < 500ms
+    const filler = tts.getRandomFiller(session.voiceGender);
+    const fillerText = filler ? filler.text : tts.getRandomFillerText();
+    const respondUrl = `/voice/respond?callId=${encodeURIComponent(callId)}&pid=${processId}`;
+
+    res.type('text/xml').send(
 `<Response>
-  ${say(ai.text, session)}
-  ${gather(action, session)}
-  ${say("You there?", session)}
-  ${gather(action, session)}
-  ${say("Okay, bye!", session)}
+  ${filler ? playOrSay(filler.audioId, fillerText, session) : sayTwiml(fillerText, session)}
+  <Redirect method="POST">${respondUrl}</Redirect>
 </Response>`);
-    }
+
   } catch (err) {
-    console.error(`❌ Voice error (${callId}):`, err.message, err.stack);
+    console.error(`❌ Voice error (${callId}):`, err.message);
     res.type('text/xml').send(`<Response><Say voice="Polly.Ruth-Generative">Sorry, technical issue. Goodbye.</Say></Response>`);
   }
 });
 
-// ── POST /voice/status ──────────────────────────────────────────────────────
+// ── POST /voice/respond — deliver AI response after filler ──────────────────
+router.post('/respond', validateTwilioVoiceSignature, async (req, res) => {
+  const callId = req.query.callId;
+  const processId = req.query.pid;
+
+  const session = activeCallSessions.get(callId);
+  if (!session) {
+    res.type('text/xml').send(`<Response><Say voice="Polly.Ruth-Generative">Goodbye.</Say></Response>`);
+    return;
+  }
+
+  const action = `/voice/outbound?callId=${encodeURIComponent(callId)}`;
+
+  try {
+    const pending = pendingResponses.get(processId);
+    if (!pending) {
+      // Fallback: process inline (shouldn't happen)
+      const ai = await processVoiceResponse(session);
+      return sendVoiceResponse(res, ai, session, action);
+    }
+
+    // Await the result — it was started during /outbound, may already be done
+    const ai = await pending.promise;
+    pendingResponses.delete(processId);
+
+    sendVoiceResponse(res, ai, session, action);
+
+  } catch (err) {
+    console.error(`❌ Respond error (${callId}):`, err.message);
+    res.type('text/xml').send(`<Response><Say voice="Polly.Ruth-Generative">Sorry about that. Could you repeat that?</Say>${gatherTwiml(action)}</Response>`);
+  }
+});
+
+function sendVoiceResponse(res, ai, session, action) {
+  session.history.push({ role: 'assistant', content: ai.text });
+  console.log(`🤖 AI: "${ai.text}" [end=${ai.endCall}] [tts=${ai.audioId ? 'external' : 'twilio'}]`);
+
+  if (ai.endCall) {
+    res.type('text/xml').send(
+      `<Response>${playOrSay(ai.audioId, ai.text, session)}</Response>`
+    );
+  } else {
+    res.type('text/xml').send(
+`<Response>
+  ${playOrSay(ai.audioId, ai.text, session)}
+  ${gatherTwiml(action)}
+  ${sayTwiml("You there?", session)}
+  ${gatherTwiml(action)}
+  ${sayTwiml("Okay, bye!", session)}
+</Response>`);
+  }
+}
+
+// ── POST /voice/status — call lifecycle ─────────────────────────────────────
 router.post('/status', validateTwilioVoiceSignature, async (req, res) => {
   const callId = req.query.callId;
   const status = req.body.CallStatus;
-  console.log(`📞 Call status (${callId}): ${status}`);
+  console.log(`📞 Status (${callId}): ${status}`);
   res.sendStatus(200);
 
   const session = activeCallSessions.get(callId);
@@ -173,27 +255,23 @@ router.post('/status', validateTwilioVoiceSignature, async (req, res) => {
   }
 });
 
-// ── Claude voice AI — ultra-fast, ultra-brief ───────────────────────────────
+// ── Claude voice AI + TTS generation (runs in background) ───────────────────
 
-async function getVoiceAIResponse(session) {
-  const sys = `You are on a live phone call. You are Kova, calling on behalf of ${session.customerName}.
+async function processVoiceResponse(session) {
+  const startMs = Date.now();
 
+  // Ultra-minimal system prompt for speed (~150 words)
+  const sys = `Live phone call. You are Kova calling for ${session.customerName}.
 PURPOSE: ${session.purpose}
-${session.profileSummary ? `\nCLIENT: ${session.profileSummary}` : ''}
-
-CRITICAL RULES:
-- Respond in 1 short sentence ONLY. Max 10 words. Be extremely brief.
-- Sound human. Use: "yeah", "sure", "got it", "cool", "right", "perfect".
-- Use contractions: I'm, that's, I'll, don't, won't.
-- When booking, give client's full name.
-- When done, end with [END_CALL].
-- Never say you're AI.
-
-EXAMPLES:
-"Hey, calling for ${session.customerName} — table for four tonight?"
-"Perfect, 7:30 works great."
-"Under ${session.customerName}, thanks!"
-"Awesome, thanks! Bye! [END_CALL]"`;
+${session.profileSummary ? `CLIENT INFO: ${session.profileSummary}` : ''}
+RULES:
+- 1 sentence max. Under 12 words.
+- Sound natural: use "yeah", "sure", "got it", "mm-hmm", "cool", "right", "perfect", "awesome".
+- Use contractions: I'm, that's, I'll, don't, won't, can't.
+- Add natural pauses: "So... table for four?" or "Right, got it."
+- Give client's full name when booking.
+- Say [END_CALL] when done.
+- Never reveal you're AI.`;
 
   const r = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
@@ -202,9 +280,23 @@ EXAMPLES:
     messages: session.history,
   });
 
-  const text = r.content[0]?.text || "Could you repeat that?";
+  let text = r.content[0]?.text || "Could you repeat that?";
   const endCall = text.includes('[END_CALL]');
-  return { text: text.replace(/\[END_CALL\]/g, '').trim(), endCall };
+  text = text.replace(/\[END_CALL\]/g, '').trim();
+
+  const claudeMs = Date.now() - startMs;
+  console.log(`⚡ Claude: ${claudeMs}ms`);
+
+  // Generate TTS audio (if external provider available)
+  let audioId = null;
+  try {
+    audioId = await tts.generateSpeech(text, session.voiceGender, session.customVoiceId);
+  } catch {}
+
+  const totalMs = Date.now() - startMs;
+  console.log(`⚡ Total process: ${totalMs}ms (Claude ${claudeMs}ms + TTS ${totalMs - claudeMs}ms)`);
+
+  return { text, endCall, audioId };
 }
 
 // ── Post-call notifications (async, never blocks) ───────────────────────────
@@ -248,13 +340,11 @@ async function sendCallFailureNotice(session, status) {
     const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
     const from = process.env.TWILIO_WHATSAPP_NUMBER;
     if (!from) return;
-
     const reason = status === 'busy' ? 'Line was busy' : status === 'no-answer' ? 'No answer' : 'Call failed';
     await twilio.messages.create({
       from: `whatsapp:${from}`, to: `whatsapp:${session.customerWhatsappFrom}`,
       body: `📞 Call to ${session.to}: ${reason}. Want me to try again?`,
     });
-
     if (session.customerId) {
       pool.query('INSERT INTO activity_log (customer_id, event_type, description) VALUES ($1, $2, $3)',
         [session.customerId, 'voice_call_failed', `Call to ${session.to}: ${reason}`]).catch(() => {});

@@ -99,6 +99,7 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
   let customerWhatsappFrom = null;
   let profileSummary = '';
   let assistantName = null;
+  let customVoiceId = null;
 
   if (customerId) {
     const { pool } = require('../db');
@@ -113,13 +114,14 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
     const profileResult = await pool.query(
       `SELECT dietary_restrictions, cuisine_preferences, preferred_restaurants,
               dining_budget, preferred_airlines, seat_preference, cabin_class,
-              hotel_preferences, full_name, assistant_name
+              hotel_preferences, full_name, assistant_name, voice_clone_id
        FROM customer_profiles WHERE customer_id=$1`,
       [customerId]
     );
     if (profileResult.rows.length) {
       const p = profileResult.rows[0];
       assistantName = p.assistant_name || null;
+      customVoiceId = p.voice_clone_id || null;
       const parts = [];
       if (p.full_name) parts.push(`Full name: ${p.full_name}`);
       if (p.dietary_restrictions) parts.push(`Dietary restrictions: ${p.dietary_restrictions}`);
@@ -157,6 +159,7 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
     initialMessage: message,
     voice: safeVoice,
     voiceGender,
+    customVoiceId,
     history: [],
     profileSummary,
     createdAt: Date.now(),
