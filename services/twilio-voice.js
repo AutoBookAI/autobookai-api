@@ -143,6 +143,9 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
     safeVoice = DEFAULT_VOICE;
   }
 
+  // Determine voice gender for ElevenLabs
+  const voiceGender = (assistantName === 'Kova (Male)') ? 'male' : 'female';
+
   // Store session for the voice webhook
   activeCallSessions.set(callId, {
     customerId,
@@ -152,6 +155,7 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
     purpose: purpose || message,
     initialMessage: message,
     voice: safeVoice,
+    voiceGender,
     history: [],
     profileSummary,
     createdAt: Date.now(),

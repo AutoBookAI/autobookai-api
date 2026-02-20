@@ -108,6 +108,18 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'send_text_message',
+    description: 'Send an SMS text message to a phone number. Use when the customer asks to text or send a message to someone via SMS.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        to:   { type: 'string', description: 'Phone number in E.164 format (e.g. +14155551234)' },
+        body: { type: 'string', description: 'The text message to send' },
+      },
+      required: ['to', 'body'],
+    },
+  },
+  {
     name: 'browser_action',
     description: `Control a headless browser to interact with websites. Use for tasks that require filling forms, clicking buttons, or navigating multi-step flows (booking restaurants, ordering rides, making reservations, filling out web forms).
 
@@ -205,6 +217,19 @@ async function executeTool(customerId, toolName, toolInput) {
       return { deleted: true };
     }
 
+    case 'send_text_message': {
+      const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      const smsFrom = process.env.TWILIO_PHONE_NUMBER;
+      if (!smsFrom) throw new Error('TWILIO_PHONE_NUMBER not configured');
+      const msg = await twilio.messages.create({
+        from: smsFrom,
+        to: toolInput.to,
+        body: toolInput.body,
+      });
+      logActivity(customerId, 'text_message_sent', `SMS to ${toolInput.to}: "${toolInput.body}"`);
+      return { messageSid: msg.sid, status: msg.status, to: toolInput.to };
+    }
+
     case 'browser_action':
       // Handled inline in handleMessage() for session lifecycle — should not reach here
       return { error: 'browser_action must be handled in handleMessage context' };
@@ -288,9 +313,10 @@ You have real, working tools. You MUST use them — NEVER just describe what you
 
 - PHONE CALLS: When the customer asks you to call someone, you MUST use the make_phone_call tool in your response. Do NOT just say "I'll call them" — actually invoke the tool. No confirmation needed.
 - EMAILS: When the customer asks you to send an email, you MUST use the send_email tool. Do NOT just describe the email — actually send it.
+- TEXT MESSAGES: When the customer asks you to text someone, you MUST use the send_text_message tool. Format phone numbers in E.164 format (e.g. +14155551234). No confirmation needed.
 - WEB SEARCH: When you need to look something up, use the web_search tool. Don't make up information.
 
-If a customer says "call +1234567890" or "call John and say hello", your response MUST contain a tool_use block for make_phone_call. Text-only responses to tool requests are WRONG.
+If a customer says "call +1234567890" or "text +1234567890 hey what's up", your response MUST contain a tool_use block. Text-only responses to tool requests are WRONG.
 
 ═══ RULES ═══
 
