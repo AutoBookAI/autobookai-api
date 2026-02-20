@@ -66,6 +66,22 @@ function validateTwilioSignature(req, res, next) {
   next();
 }
 
+// ── Phone number normalization ────────────────────────────────────────────
+// Strips all non-digit characters, ensures leading +1 for US numbers
+function normalizePhone(phone) {
+  if (!phone) return '';
+  const digits = phone.replace(/[^\d]/g, '');
+  // If 10 digits, assume US — prepend +1
+  if (digits.length === 10) return '+1' + digits;
+  // If 11 digits starting with 1, prepend +
+  if (digits.length === 11 && digits.startsWith('1')) return '+' + digits;
+  // Otherwise return as +digits
+  return '+' + digits;
+}
+
+const SIGNUP_URL = 'https://dashboard-production-0a18.up.railway.app/signup';
+const PORTAL_URL = 'https://dashboard-production-0a18.up.railway.app/portal';
+
 // ── Main webhook handler ──────────────────────────────────────────────────
 router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
   // Respond immediately with empty TwiML — Twilio requires a response
@@ -100,17 +116,40 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
     const sandboxNumber = process.env.TWILIO_WHATSAPP_NUMBER;
     const isSandbox = sandboxNumber && toNumber === sandboxNumber;
 
-    const custResult = await pool.query(
+    const lookupNumber = isSandbox ? fromNumber : toNumber;
+    const normalizedLookup = normalizePhone(lookupNumber);
+
+    // Try exact match first, then normalized match
+    let custResult = await pool.query(
       `SELECT c.id, c.name, c.subscription_status, c.whatsapp_from, c.plan
        FROM customers c
        WHERE c.whatsapp_to = $1`,
-      [isSandbox ? fromNumber : toNumber]
+      [lookupNumber]
     );
 
+    if (!custResult.rows.length && normalizedLookup !== lookupNumber) {
+      custResult = await pool.query(
+        `SELECT c.id, c.name, c.subscription_status, c.whatsapp_from, c.plan
+         FROM customers c
+         WHERE c.whatsapp_to = $1`,
+        [normalizedLookup]
+      );
+    }
+
+    // Also try matching by whatsapp_from (sender's number) in sandbox mode
+    if (!custResult.rows.length && isSandbox) {
+      custResult = await pool.query(
+        `SELECT c.id, c.name, c.subscription_status, c.whatsapp_from, c.plan
+         FROM customers c
+         WHERE c.whatsapp_from = $1 OR c.whatsapp_from = $2`,
+        [fromNumber, normalizedLookup]
+      );
+    }
+
     if (!custResult.rows.length) {
-      console.warn(`No customer found for ${isSandbox ? 'sender' : 'number'} ${isSandbox ? fromNumber : toNumber}`);
+      console.warn(`No customer found for ${isSandbox ? 'sender' : 'number'} ${lookupNumber}`);
       await sendWhatsAppReply(toNumber, fromNumber,
-        'Sorry, this number is not currently active. Please contact support.');
+        `Hey! You need a Kova account to use this service. Sign up at ${SIGNUP_URL}`);
       return;
     }
 
@@ -119,7 +158,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
     // ── Step 2: Validate customer status ────────────────────────────────
     if (customer.subscription_status !== 'active') {
       await sendWhatsAppReply(toNumber, fromNumber,
-        `Your subscription is not currently active. Please visit ${process.env.FRONTEND_URL}/portal to reactivate.`);
+        `Your Kova subscription isn't active. Manage your billing at ${PORTAL_URL}`);
       return;
     }
 
