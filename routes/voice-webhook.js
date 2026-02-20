@@ -19,6 +19,17 @@ const { activeCallSessions, escapeXml } = require('../services/twilio-voice');
 
 const anthropic = new Anthropic();
 
+// Wrap text in SSML prosody for natural pacing (slightly slower, with pauses)
+function ssml(text) {
+  const escaped = escapeXml(text);
+  // Add a brief pause after sentences for natural rhythm
+  const withPauses = escaped
+    .replace(/\. /g, '. <break time="250ms"/> ')
+    .replace(/\? /g, '? <break time="300ms"/> ')
+    .replace(/! /g, '! <break time="250ms"/> ');
+  return `<speak><prosody rate="94%">${withPauses}</prosody></speak>`;
+}
+
 // ── POST /voice/outbound — Main conversation loop ───────────────────────────
 router.post('/outbound', async (req, res) => {
   const callId = req.query.callId;
@@ -37,18 +48,18 @@ router.post('/outbound', async (req, res) => {
   try {
     if (!speechResult) {
       // First hit — call just connected, deliver the greeting
-      console.log(`📞 Call connected (callId: ${callId}), delivering greeting`);
+      console.log(`📞 Call connected (callId: ${callId}), delivering greeting with voice: ${voice}`);
       res.type('text/xml').send(
 `<Response>
-  <Say voice="${voice}">${escapeXml(session.initialMessage)}</Say>
+  <Say voice="${voice}">${ssml(session.initialMessage)}</Say>
   <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="auto" language="en-US" enhanced="true">
-    <Say voice="${voice}"> </Say>
+    <Say voice="${voice}"><speak><break time="10s"/></speak></Say>
   </Gather>
-  <Say voice="${voice}">I didn't hear a response. Let me try once more.</Say>
+  <Say voice="${voice}">${ssml("I didn't hear a response. Let me try once more.")}</Say>
   <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="5" language="en-US" enhanced="true">
-    <Say voice="${voice}">Are you there?</Say>
+    <Say voice="${voice}">${ssml("Are you there?")}</Say>
   </Gather>
-  <Say voice="${voice}">It seems like you're not available. I'll let my client know. Goodbye!</Say>
+  <Say voice="${voice}">${ssml("It seems like you're not available. I'll let my client know. Goodbye!")}</Say>
 </Response>`
       );
     } else {
@@ -65,7 +76,7 @@ router.post('/outbound', async (req, res) => {
         // AI decided to end the call — say goodbye and hang up
         res.type('text/xml').send(
 `<Response>
-  <Say voice="${voice}">${escapeXml(aiResponse.text)}</Say>
+  <Say voice="${voice}">${ssml(aiResponse.text)}</Say>
 </Response>`
         );
         // Summary will be sent by the status callback
@@ -73,15 +84,15 @@ router.post('/outbound', async (req, res) => {
         // Continue the conversation
         res.type('text/xml').send(
 `<Response>
-  <Say voice="${voice}">${escapeXml(aiResponse.text)}</Say>
+  <Say voice="${voice}">${ssml(aiResponse.text)}</Say>
   <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="auto" language="en-US" enhanced="true">
-    <Say voice="${voice}"> </Say>
+    <Say voice="${voice}"><speak><break time="10s"/></speak></Say>
   </Gather>
-  <Say voice="${voice}">Are you still there?</Say>
+  <Say voice="${voice}">${ssml("Are you still there?")}</Say>
   <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="4" language="en-US" enhanced="true">
-    <Say voice="${voice}"> </Say>
+    <Say voice="${voice}"><speak><break time="5s"/></speak></Say>
   </Gather>
-  <Say voice="${voice}">I'll end the call now. Thank you for your time. Goodbye!</Say>
+  <Say voice="${voice}">${ssml("I'll end the call now. Thank you for your time. Goodbye!")}</Say>
 </Response>`
         );
       }

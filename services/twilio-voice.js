@@ -32,7 +32,18 @@ const ALLOWED_VOICES = new Set([
   'Polly.Ivy', 'Polly.Justin', 'Polly.Ruth', 'Polly.Stephen',
   'Google.en-US-Standard-A', 'Google.en-US-Standard-B',
   'Google.en-US-Standard-C', 'Google.en-US-Standard-D',
+  // Neural / natural-sounding voices
+  'Google.en-US-Neural2-F', 'Google.en-US-Neural2-D',
+  'Google.en-US-Neural2-A', 'Google.en-US-Neural2-C',
+  'Polly.Joanna-Neural', 'Polly.Matthew-Neural',
 ]);
+
+// Map customer's Kova voice preference to a natural-sounding TTS voice
+const VOICE_FOR_PREFERENCE = {
+  'Kova (Female)': 'Google.en-US-Neural2-F',
+  'Kova (Male)':   'Google.en-US-Neural2-D',
+};
+const DEFAULT_VOICE = 'Google.en-US-Neural2-F';
 
 // ── Active call sessions ────────────────────────────────────────────────────
 // Keyed by callId (UUID). Each session holds conversation state for the voice webhook.
@@ -79,9 +90,6 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
   const masterApiUrl = process.env.MASTER_API_URL;
   if (!masterApiUrl) throw new Error('MASTER_API_URL not set — needed for voice webhooks');
 
-  // Validate voice against allowlist
-  const safeVoice = ALLOWED_VOICES.has(voice) ? voice : 'Polly.Joanna';
-
   // Generate unique call ID for session tracking
   const callId = crypto.randomUUID();
 
@@ -89,6 +97,7 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
   let customerName = 'a client';
   let customerWhatsappFrom = null;
   let profileSummary = '';
+  let assistantName = null;
 
   if (customerId) {
     const { pool } = require('../db');
@@ -103,12 +112,13 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
     const profileResult = await pool.query(
       `SELECT dietary_restrictions, cuisine_preferences, preferred_restaurants,
               dining_budget, preferred_airlines, seat_preference, cabin_class,
-              hotel_preferences, full_name
+              hotel_preferences, full_name, assistant_name
        FROM customer_profiles WHERE customer_id=$1`,
       [customerId]
     );
     if (profileResult.rows.length) {
       const p = profileResult.rows[0];
+      assistantName = p.assistant_name || null;
       const parts = [];
       if (p.full_name) parts.push(`Full name: ${p.full_name}`);
       if (p.dietary_restrictions) parts.push(`Dietary restrictions: ${p.dietary_restrictions}`);
@@ -121,6 +131,16 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
       if (p.hotel_preferences) parts.push(`Hotel preferences: ${p.hotel_preferences}`);
       profileSummary = parts.join('\n');
     }
+  }
+
+  // Select voice: explicit override → customer preference → default neural voice
+  let safeVoice;
+  if (voice && ALLOWED_VOICES.has(voice)) {
+    safeVoice = voice;
+  } else if (assistantName && VOICE_FOR_PREFERENCE[assistantName]) {
+    safeVoice = VOICE_FOR_PREFERENCE[assistantName];
+  } else {
+    safeVoice = DEFAULT_VOICE;
   }
 
   // Store session for the voice webhook
