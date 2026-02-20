@@ -69,7 +69,7 @@ function requireAdminAuth(req, res, next) {
 
 function sayTwiml(text, session) {
   const v = session.voice || 'Polly.Ruth-Generative';
-  return `<Say voice="${v}"><prosody rate="93%"><break time="100ms"/>${escapeXml(text)}</prosody></Say>`;
+  return `<Say voice="${v}"><prosody rate="93%"><break time="150ms"/>${escapeXml(text)}</prosody></Say>`;
 }
 
 function playOrSay(audioId, text, session) {
@@ -265,38 +265,44 @@ async function processVoiceResponse(session) {
 PURPOSE: ${session.purpose}
 ${session.profileSummary ? `CLIENT INFO: ${session.profileSummary}` : ''}
 RULES:
-- 1 sentence max. Under 12 words.
-- Sound natural: use "yeah", "sure", "got it", "mm-hmm", "cool", "right", "perfect", "awesome".
+- 1 sentence max. Under 15 words.
+- Sound casual and human. Say "gonna" not "going to", "wanna" not "want to".
+- Use "yeah", "sure", "got it", "mm-hmm", "cool", "right", "perfect", "awesome".
 - Use contractions: I'm, that's, I'll, don't, won't, can't.
-- Add natural pauses: "So... table for four?" or "Right, got it."
+- Natural pauses: "So... table for four?" or "Right, got it."
 - Give client's full name when booking.
 - Say [END_CALL] when done.
 - Never reveal you're AI.`;
 
-  const r = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 40,
-    system: sys,
-    messages: session.history,
-  });
-
-  let text = r.content[0]?.text || "Could you repeat that?";
-  const endCall = text.includes('[END_CALL]');
-  text = text.replace(/\[END_CALL\]/g, '').trim();
-
-  const claudeMs = Date.now() - startMs;
-  console.log(`⚡ Claude: ${claudeMs}ms`);
-
-  // Generate TTS audio (if external provider available)
-  let audioId = null;
   try {
-    audioId = await tts.generateSpeech(text, session.voiceGender, session.customVoiceId);
-  } catch {}
+    const r = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 40,
+      system: sys,
+      messages: session.history,
+    });
 
-  const totalMs = Date.now() - startMs;
-  console.log(`⚡ Total process: ${totalMs}ms (Claude ${claudeMs}ms + TTS ${totalMs - claudeMs}ms)`);
+    let text = r.content[0]?.text || "Could you repeat that?";
+    const endCall = text.includes('[END_CALL]');
+    text = text.replace(/\[END_CALL\]/g, '').trim();
 
-  return { text, endCall, audioId };
+    const claudeMs = Date.now() - startMs;
+    console.log(`⚡ Claude: ${claudeMs}ms`);
+
+    // Generate TTS audio (if external provider available)
+    let audioId = null;
+    try {
+      audioId = await tts.generateSpeech(text, session.voiceGender, session.customVoiceId);
+    } catch {}
+
+    const totalMs = Date.now() - startMs;
+    console.log(`⚡ Total process: ${totalMs}ms (Claude ${claudeMs}ms + TTS ${totalMs - claudeMs}ms)`);
+
+    return { text, endCall, audioId };
+  } catch (err) {
+    console.error(`❌ Claude API error:`, err.message);
+    return { text: "I'm having a moment, could you repeat that?", endCall: false, audioId: null };
+  }
 }
 
 // ── Post-call notifications (async, never blocks) ───────────────────────────
