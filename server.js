@@ -3,6 +3,8 @@ const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
+const path      = require('path');
+const os        = require('os');
 const { pool, initDB } = require('./db');
 
 const app = express();
@@ -27,12 +29,15 @@ app.use(
   require('./routes/whatsapp-webhook')
 );
 
-// ── Twilio Voice webhook — Gather + Say, pure HTTP ──────────────────────────────
+// ── Twilio Voice webhook — Gather + ElevenLabs Play ─────────────────────────────
 app.use(
   '/webhook/voice',
   express.urlencoded({ extended: true }),
   require('./routes/voice-webhook')
 );
+
+// ── Serve generated voice audio files ───────────────────────────────────────────
+app.use('/voice-audio', express.static(path.join(os.tmpdir(), 'voice-audio')));
 
 // ── Standard middleware ────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10kb' }));
