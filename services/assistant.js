@@ -399,19 +399,24 @@ TIPS:
 - Include dietary restrictions in restaurant reservation notes
 - Use preferred airlines, cabin class, and loyalty numbers for travel bookings
 
-═══ CRITICAL: TOOL USAGE ═══
+═══ CRITICAL: TOOL USAGE — YOU MUST ACTUALLY USE TOOLS ═══
 
-You have real, working tools. You MUST use them — NEVER just describe what you would do.
+NEVER pretend to use tools. NEVER generate fake tool output. NEVER claim you made a call, sent an email, or completed any action without ACTUALLY invoking the tool. If a tool call fails, say it failed honestly.
 
-- PHONE CALLS: When the customer asks you to call someone, you MUST use the make_phone_call tool in your response. Do NOT just say "I'll call them" — actually invoke the tool. No confirmation needed.
-- EMAILS: When the customer asks you to send an email, you MUST use the send_email tool. Do NOT just describe the email — actually send it.
-- TEXT MESSAGES: When the customer asks you to text someone, you MUST use the send_text_message tool. Format phone numbers in E.164 format (e.g. +14155551234). No confirmation needed.
-- WEB SEARCH: When you need to look something up, use the web_search tool. Don't make up information.
-- WEATHER: When asked about weather, use the get_weather tool. Don't guess.
-- REMINDERS: When asked to set a reminder, use the set_reminder tool with an ISO datetime.
-- IMAGES: When asked to create/generate/draw an image, use the generate_image tool.
+Your response to ANY action request MUST contain a tool_use block. A text-only response to an action request is ALWAYS WRONG.
 
-If a customer says "call +1234567890" or "text +1234567890 hey what's up", your response MUST contain a tool_use block. Text-only responses to tool requests are WRONG.
+- "call +1234567890" → your response MUST include a make_phone_call tool_use block
+- "send an email to X" → your response MUST include a send_email tool_use block
+- "text +1234567890 hey" → your response MUST include a send_text_message tool_use block
+- "what's the weather" → your response MUST include a get_weather tool_use block
+- "remind me to X at Y" → your response MUST include a set_reminder tool_use block
+- "search for X" → your response MUST include a web_search tool_use block
+- "generate an image of X" → your response MUST include a generate_image tool_use block
+
+DO NOT say "I'll call them now" or "I'm placing the call" in a text response. That is FAKE. You must ACTUALLY invoke the tool.
+DO NOT say "Done! I've sent the email" without a preceding tool_use block and successful tool_result. That is LYING.
+
+If the conversation history shows you previously "completed" an action via text only (no tool_use), that was a hallucination. Ignore it and actually use the tool this time.
 
 ═══ RULES ═══
 
@@ -482,10 +487,16 @@ async function loadConversationHistory(customerId) {
 
 // ── Save messages ───────────────────────────────────────────────────────────
 
-async function saveMessages(customerId, userMessage, assistantReply) {
+async function saveMessages(customerId, userMessage, assistantReply, toolsUsed) {
+  // Include tool usage evidence in saved history so Claude doesn't hallucinate past tool use
+  let savedReply = assistantReply;
+  if (toolsUsed && toolsUsed.length > 0) {
+    const toolNote = toolsUsed.map(t => `[Used tool: ${t.name} → ${t.success ? 'success' : 'failed'}]`).join('\n');
+    savedReply = `${toolNote}\n\n${assistantReply}`;
+  }
   await pool.query(
     `INSERT INTO conversations (customer_id, role, content) VALUES ($1, 'user', $2), ($1, 'assistant', $3)`,
-    [customerId, userMessage, assistantReply]
+    [customerId, userMessage, savedReply]
   );
 }
 
@@ -516,6 +527,7 @@ async function handleMessage(customerId, userMessage) {
 
   // Browser session — persists across tool-use loop iterations, cleaned up in finally
   let browserSession = null;
+  const toolsUsed = []; // Track tool usage for conversation history
 
   try {
     // 5. Call Claude in a tool-use loop
@@ -558,8 +570,10 @@ async function handleMessage(customerId, userMessage) {
             } else {
               result = await executeTool(customerId, block.name, block.input);
             }
+            toolsUsed.push({ name: block.name, success: true });
           } catch (err) {
             console.error(`❌ Tool ${block.name} FAILED for customer ${customerId}:`, err.message);
+            toolsUsed.push({ name: block.name, success: false });
             toolResults.push({
               type: 'tool_result',
               tool_use_id: block.id,
@@ -597,8 +611,8 @@ async function handleMessage(customerId, userMessage) {
       .map(block => block.text)
       .join('\n');
 
-    // 7. Save to conversation history
-    await saveMessages(customerId, userMessage, replyText);
+    // 7. Save to conversation history (includes tool usage evidence)
+    await saveMessages(customerId, userMessage, replyText, toolsUsed);
 
     return replyText || 'I processed your request but had no text response. Please try again.';
 
