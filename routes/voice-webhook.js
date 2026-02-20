@@ -2,7 +2,6 @@
  * Voice Webhook — Twilio voice call conversation loop.
  *
  * Optimized for minimum latency:
- *   - Instant filler ("Got it") plays while Claude generates real response
  *   - Claude Haiku with max_tokens=40 for ultra-short replies
  *   - No DB calls in the hot path
  *   - speechTimeout=1, timeout=3 for fast turn-taking
@@ -15,18 +14,9 @@
 const router = require('express').Router();
 const Anthropic = require('@anthropic-ai/sdk');
 const { pool } = require('../db');
-const { activeCallSessions, escapeXml } = require('../services/twilio-voice');
+const { activeCallSessions, escapeXml, makeCall } = require('../services/twilio-voice');
 
 const anthropic = new Anthropic();
-
-// Instant filler words — rotated to sound natural
-const FILLERS = ['Got it.', 'Sure.', 'Okay.', 'Right.', 'Mhm.', 'Yeah.'];
-let fillerIdx = 0;
-function nextFiller() {
-  const f = FILLERS[fillerIdx % FILLERS.length];
-  fillerIdx++;
-  return f;
-}
 
 // ── TTS helper ───────────────────────────────────────────────────────────────
 
@@ -35,18 +25,49 @@ function say(text, session) {
   return `<Say voice="${v}">${escapeXml(text)}</Say>`;
 }
 
-function gather(action, session, inner) {
-  const v = session.voice || 'Polly.Ruth-Generative';
-  return `<Gather input="speech" action="${action}" method="POST" speechTimeout="1" timeout="3" language="en-US" enhanced="true" bargeIn="true">${inner || ''}</Gather>`;
+function gather(action, session) {
+  return `<Gather input="speech" action="${action}" method="POST" speechTimeout="1" timeout="3" language="en-US" enhanced="true" bargeIn="true"></Gather>`;
 }
+
+// ── GET /voice/test-call — make a test call from WITHIN the server process ──
+router.get('/test-call', async (req, res) => {
+  const to = req.query.to;
+  if (!to) return res.status(400).json({ error: 'Missing ?to= parameter' });
+  try {
+    const result = await makeCall({
+      to,
+      message: 'Hi, this is Kova. Just a quick test call to make sure everything is working. How are you?',
+      purpose: 'Test call to verify voice system works end-to-end',
+      customerId: 1,
+    });
+    console.log(`🧪 Test call initiated: ${JSON.stringify(result)}`);
+    console.log(`🧪 Active sessions: ${activeCallSessions.size}, keys: [${[...activeCallSessions.keys()].join(', ')}]`);
+    res.json({ success: true, ...result, activeSessions: activeCallSessions.size });
+  } catch (err) {
+    console.error('Test call failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /voice/debug — show active sessions ─────────────────────────────────
+router.get('/debug', (req, res) => {
+  const sessions = [];
+  for (const [id, s] of activeCallSessions) {
+    sessions.push({ callId: id, to: s.to, purpose: s.purpose, voice: s.voice, historyLen: s.history.length, age: Math.round((Date.now() - s.createdAt) / 1000) + 's' });
+  }
+  res.json({ activeSessions: sessions.length, sessions });
+});
 
 // ── POST /voice/outbound ────────────────────────────────────────────────────
 router.post('/outbound', async (req, res) => {
   const callId = req.query.callId;
+  console.log(`📞 Voice webhook hit: callId=${callId}, activeSessions=${activeCallSessions.size}`);
+
   const session = activeCallSessions.get(callId);
 
   if (!session) {
-    res.type('text/xml').send('<Response><Say>Sorry, something went wrong.</Say></Response>');
+    console.error(`❌ No session found for callId=${callId}. Active keys: [${[...activeCallSessions.keys()].join(', ')}]`);
+    res.type('text/xml').send(`<Response><Say voice="Polly.Ruth-Generative">Sorry, I couldn't connect this call. Please try again.</Say></Response>`);
     return;
   }
 
@@ -56,6 +77,7 @@ router.post('/outbound', async (req, res) => {
   try {
     if (!speech) {
       // Call just connected — deliver greeting immediately
+      console.log(`📞 Call connected (${callId}), delivering greeting`);
       res.type('text/xml').send(
 `<Response>
   ${say(session.initialMessage, session)}
@@ -68,11 +90,13 @@ router.post('/outbound', async (req, res) => {
     }
 
     // Hot path: person spoke → respond FAST
+    console.log(`🎙️ Speech (${callId}): "${speech}"`);
     session.history.push({ role: 'user', content: speech });
 
     // Fire Claude request immediately (no DB calls, no delays)
     const ai = await getVoiceAIResponse(session);
     session.history.push({ role: 'assistant', content: ai.text });
+    console.log(`🤖 AI (${callId}): "${ai.text}" [end=${ai.endCall}]`);
 
     if (ai.endCall) {
       res.type('text/xml').send(`<Response>${say(ai.text, session)}</Response>`);
@@ -87,8 +111,8 @@ router.post('/outbound', async (req, res) => {
 </Response>`);
     }
   } catch (err) {
-    console.error(`Voice error (${callId}):`, err.message);
-    res.type('text/xml').send('<Response><Say>Sorry, technical issue. Goodbye.</Say></Response>');
+    console.error(`❌ Voice error (${callId}):`, err.message, err.stack);
+    res.type('text/xml').send(`<Response><Say voice="Polly.Ruth-Generative">Sorry, technical issue. Goodbye.</Say></Response>`);
   }
 });
 
@@ -96,12 +120,12 @@ router.post('/outbound', async (req, res) => {
 router.post('/status', async (req, res) => {
   const callId = req.query.callId;
   const status = req.body.CallStatus;
+  console.log(`📞 Call status (${callId}): ${status}`);
   res.sendStatus(200);
 
   const session = activeCallSessions.get(callId);
   if (!session) return;
 
-  // All post-call work is fire-and-forget, never blocks the call
   try {
     if (status === 'completed' && session.history.length > 0) {
       sendCallSummary(session).catch(() => {});

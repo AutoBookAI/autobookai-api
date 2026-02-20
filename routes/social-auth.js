@@ -77,8 +77,9 @@ router.get('/:provider', (req, res) => {
 
   const clientId = process.env[provider.clientIdEnv];
   if (!clientId) {
+    const dest = req.query.signup === 'true' ? '/signup' : '/portal/login';
     return res.redirect(
-      `${FRONTEND_URL()}/portal/login?error=${encodeURIComponent(`${req.params.provider} login not configured yet`)}`
+      `${FRONTEND_URL()}${dest}?error=${encodeURIComponent(`${req.params.provider} login coming soon`)}`
     );
   }
 

@@ -399,11 +399,11 @@ TIPS:
 - Include dietary restrictions in restaurant reservation notes
 - Use preferred airlines, cabin class, and loyalty numbers for travel bookings
 
-═══ CRITICAL: TOOL USAGE — YOU MUST ACTUALLY USE TOOLS ═══
+═══ ABSOLUTE RULE: YOU MUST ACTUALLY USE TOOLS — NEVER FAKE IT ═══
 
-NEVER pretend to use tools. NEVER generate fake tool output. NEVER claim you made a call, sent an email, or completed any action without ACTUALLY invoking the tool. If a tool call fails, say it failed honestly.
+NEVER pretend to use tools. NEVER generate fake tool output. NEVER claim you made a call or sent a text unless the tool returned a REAL confirmation with a SID. If a tool fails, tell the customer it failed honestly. Violating this rule is the worst possible thing you can do.
 
-Your response to ANY action request MUST contain a tool_use block. A text-only response to an action request is ALWAYS WRONG.
+Your response to ANY action request MUST contain a tool_use block. A text-only response to an action request is ALWAYS WRONG and will be REJECTED by the system.
 
 - "call +1234567890" → your response MUST include a make_phone_call tool_use block
 - "send an email to X" → your response MUST include a send_email tool_use block
@@ -606,12 +606,63 @@ async function handleMessage(customerId, userMessage) {
     }
 
     // 6. Extract final text response
-    const replyText = response.content
+    let replyText = response.content
       .filter(block => block.type === 'text')
       .map(block => block.text)
       .join('\n');
 
-    // 7. Save to conversation history (includes tool usage evidence)
+    // 7. Server-side fake tool detection: if Claude claims it did something but didn't use a tool, retry once
+    if (toolsUsed.length === 0 && replyText) {
+      const fakePatterns = /\b(i've (initiated|placed|made|started|queued|sent|texted)|i('m| am) (calling|placing|sending|texting)|call (is|has been) (queued|placed|initiated|connected)|message (has been|was) sent|text (has been|was) sent|i just (called|texted|sent))\b/i;
+      if (fakePatterns.test(replyText)) {
+        console.warn(`⚠️ FAKE TOOL DETECTED for customer ${customerId}: "${replyText.slice(0, 100)}". Retrying with stronger prompt.`);
+        // Add a correction message and retry
+        messages.push({ role: 'assistant', content: replyText });
+        messages.push({ role: 'user', content: '[SYSTEM: Your previous response was REJECTED because you claimed to perform an action without actually using a tool. You MUST use the tool_use block to perform the action. Do it NOW.]' });
+
+        response = await anthropic.messages.create({
+          model: 'claude-sonnet-4-5-20250929',
+          max_tokens: 4096,
+          system: systemPrompt,
+          messages,
+          tools: TOOL_DEFINITIONS,
+        });
+
+        console.log(`📡 Claude retry: stop_reason=${response.stop_reason}, blocks=${response.content.map(b => b.type).join(',')}`);
+
+        // Process any tool calls from the retry
+        while (response.stop_reason === 'tool_use') {
+          const retryContent = response.content;
+          messages.push({ role: 'assistant', content: retryContent });
+          const retryResults = [];
+          for (const block of retryContent) {
+            if (block.type === 'tool_use') {
+              console.log(`🔧 Retry tool call: ${block.name}`, JSON.stringify(block.input).slice(0, 200));
+              try {
+                const result = await executeTool(customerId, block.name, block.input);
+                toolsUsed.push({ name: block.name, success: true });
+                retryResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
+              } catch (err) {
+                toolsUsed.push({ name: block.name, success: false });
+                retryResults.push({ type: 'tool_result', tool_use_id: block.id, content: `TOOL FAILED: ${err.message}`, is_error: true });
+              }
+            }
+          }
+          messages.push({ role: 'user', content: retryResults });
+          response = await anthropic.messages.create({
+            model: 'claude-sonnet-4-5-20250929',
+            max_tokens: 4096,
+            system: systemPrompt,
+            messages,
+            tools: TOOL_DEFINITIONS,
+          });
+        }
+
+        replyText = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+      }
+    }
+
+    // 8. Save to conversation history (includes tool usage evidence)
     await saveMessages(customerId, userMessage, replyText, toolsUsed);
 
     return replyText || 'I processed your request but had no text response. Please try again.';
