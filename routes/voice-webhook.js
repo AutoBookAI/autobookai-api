@@ -22,7 +22,7 @@ const anthropic = new Anthropic();
 
 function say(text, session) {
   const v = session.voice || 'Polly.Ruth-Generative';
-  return `<Say voice="${v}">${escapeXml(text)}</Say>`;
+  return `<Say voice="${v}"><prosody rate="95%">${escapeXml(text)}</prosody></Say>`;
 }
 
 function gather(action, session) {
