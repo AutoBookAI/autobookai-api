@@ -1,16 +1,19 @@
 /**
- * Voice Webhook — Twilio ConversationRelay with Claude Haiku streaming.
+ * Voice Webhook — Twilio ConversationRelay + Gather/Say fallback.
  *
- * Architecture:
- *   1. makeCall() creates outbound call → Twilio hits /voice/outbound
- *   2. Returns ConversationRelay TwiML (ElevenLabs TTS) → Twilio opens WS to /voice-ws
- *   3. Person speaks → Twilio sends {"type": "prompt", "voicePrompt": "..."}
- *   4. Claude Haiku streams tokens → each sent IMMEDIATELY to ConversationRelay
- *   5. ElevenLabs speaks each token in real-time
+ * Primary: ConversationRelay WebSocket with Claude Haiku streaming
+ *   1. Twilio hits GET/POST /webhook/voice → returns ConversationRelay TwiML
+ *   2. Twilio opens WebSocket to /voice-ws
+ *   3. Person speaks → {"type":"prompt","voicePrompt":"..."} → Claude Haiku streams tokens back
  *
- * TTS: ElevenLabs via ConversationRelay (customer clone or Rachel default)
- * STT: Twilio Deepgram
- * AI:  Claude Haiku (streaming, fastest model)
+ * Fallback: Gather + Say (if ConversationRelay doesn't work on this account)
+ *   1. Twilio hits GET/POST /webhook/voice/gather → returns Gather+Say TwiML
+ *   2. Person speaks → Twilio hits POST /webhook/voice/respond with SpeechResult
+ *   3. Claude Haiku generates response → returned as Say TwiML
+ *
+ * TTS: Google en-US-Journey-F via ConversationRelay (or Google.en-US-Neural2-F for Say)
+ * STT: Google via ConversationRelay (or Twilio enhanced for Gather)
+ * AI:  Claude Haiku (streaming for WS, non-streaming for Gather)
  */
 
 const router = require('express').Router();
@@ -20,60 +23,300 @@ const { activeCallSessions, escapeXml } = require('../services/twilio-voice');
 
 const anthropic = new Anthropic();
 
-// ElevenLabs default voice (Rachel) — used when customer has no clone
-const ELEVENLABS_DEFAULT_VOICE = '21m00Tcm4TlvDq8ikWAM';
+const VOICE_SYSTEM_PROMPT = 'You are Kova, a friendly and helpful AI phone assistant. Keep ALL responses to 1-2 sentences maximum. Be warm, natural, and conversational. You are on a live phone call, so speak like a real person, not a chatbot. Never use markdown, bullet points, or formatting. Never say "as an AI" or "as a language model".';
 
-// Short system prompt for minimum latency
-const VOICE_SYSTEM_PROMPT = 'You are Kova, a helpful AI phone assistant. Keep all responses to 1-2 sentences. Be conversational and natural. You\'re on a phone call, not writing an essay.';
+const DEFAULT_GREETING = 'Hi! This is Kova, your AI assistant. How can I help you today?';
 
-// ── Twilio signature verification ───────────────────────────────────────────
-function validateTwilioVoiceSignature(req, res, next) {
+// ── Safe WebSocket send ─────────────────────────────────────────────────────
+function safeSend(ws, msg) {
   try {
-    const twilio = require('twilio');
-    const authToken = process.env.TWILIO_AUTH_TOKEN;
-    if (!authToken) return next();
-    const baseUrl = process.env.MASTER_API_URL;
-    if (!baseUrl) return next();
-    const webhookUrl = `${baseUrl}${req.originalUrl}`;
-    const signature = req.headers['x-twilio-signature'];
-    if (!signature) {
-      console.warn('Missing X-Twilio-Signature on voice webhook');
-      return res.type('text/xml').status(403).send('<Response/>');
+    if (ws.readyState === 1) { // OPEN
+      ws.send(JSON.stringify(msg));
     }
-    if (!twilio.validateRequest(authToken, signature, webhookUrl, req.body)) {
-      console.warn('Invalid Twilio signature on voice webhook');
-      return res.type('text/xml').status(403).send('<Response/>');
-    }
-    next();
   } catch (err) {
-    console.error('❌ Twilio signature validation error:', err.message);
-    next(); // Don't block on validation errors
+    console.error('❌ WS send error:', err.message);
   }
 }
 
-// ── Admin auth for diagnostic endpoints ─────────────────────────────────────
-function requireAdminAuth(req, res, next) {
-  const jwt = require('jsonwebtoken');
-  const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Auth required' });
+// ══════════════════════════════════════════════════════════════════════════════
+// PRIMARY: ConversationRelay
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GET and POST / — return ConversationRelay TwiML
+function handleIncoming(req, res) {
   try {
+    const callId = req.query.callId || '';
+    const masterApiUrl = process.env.MASTER_API_URL || 'https://bountiful-growth-production.up.railway.app';
+    const wsBase = masterApiUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+    const wsUrl = callId
+      ? `${wsBase}/voice-ws?callId=${encodeURIComponent(callId)}`
+      : `${wsBase}/voice-ws`;
+
+    // For outbound calls, use the session's initial message as greeting
+    let greeting = DEFAULT_GREETING;
+    if (callId) {
+      const session = activeCallSessions.get(callId);
+      if (session && session.initialMessage) {
+        greeting = session.initialMessage;
+      }
+    }
+
+    console.log(`📞 Voice TwiML: callId=${callId || 'inbound'}, wsUrl=${wsUrl}`);
+
+    res.type('text/xml').send(
+`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <ConversationRelay url="${wsUrl}" ttsProvider="google" voice="en-US-Journey-F" transcriptionProvider="google" welcomeGreeting="${escapeXml(greeting)}" interruptible="true" />
+  </Connect>
+</Response>`);
+  } catch (err) {
+    console.error('❌ Voice TwiML error:', err.message);
+    res.type('text/xml').send(
+`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Google.en-US-Neural2-F">Sorry, something went wrong. Please try again later.</Say>
+</Response>`);
+  }
+}
+
+router.get('/', handleIncoming);
+router.post('/', handleIncoming);
+
+// ── WebSocket handler for ConversationRelay (exported for server.js) ────────
+
+function handleVoiceWebSocket(ws, callId) {
+  try {
+    // Outbound calls have a pre-existing session from makeCall()
+    const session = callId ? activeCallSessions.get(callId) : null;
+    const history = session ? session.history : [];
+
+    console.log(`🔌 WS connected: callId=${callId || 'inbound'}, hasSession=${!!session}`);
+
+    ws.on('message', async (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.type === 'setup') {
+          console.log(`✅ ConversationRelay setup: callSid=${msg.callSid}, from=${msg.from}, to=${msg.to}`);
+        } else if (msg.type === 'prompt') {
+          const speech = msg.voicePrompt;
+          console.log(`🎙️ Caller said: "${speech}"`);
+          history.push({ role: 'user', content: speech });
+          await streamClaudeResponse(ws, history);
+        } else if (msg.type === 'interrupt') {
+          console.log('⚡ Caller interrupted TTS');
+        } else if (msg.type === 'dtmf') {
+          console.log(`🔢 DTMF digit: ${msg.digit}`);
+        } else if (msg.type === 'error') {
+          console.error('❌ ConversationRelay error:', msg.description || JSON.stringify(msg));
+        } else {
+          console.log(`📨 WS message type=${msg.type}:`, JSON.stringify(msg).substring(0, 200));
+        }
+      } catch (err) {
+        console.error('❌ WS message handler error:', err.message, err.stack);
+        safeSend(ws, {
+          type: 'text',
+          token: "I'm sorry, I had a brief hiccup. Could you say that again?",
+          last: true,
+        });
+      }
+    });
+
+    ws.on('close', (code, reason) => {
+      console.log(`🔌 WS closed: callId=${callId || 'inbound'}, code=${code}, reason=${reason || 'none'}`);
+    });
+
+    ws.on('error', (err) => {
+      console.error(`❌ WS error: callId=${callId || 'inbound'}`, err.message);
+    });
+  } catch (err) {
+    console.error('❌ WS handler setup error:', err.message, err.stack);
+    try { ws.close(); } catch {}
+  }
+}
+
+// ── Claude Haiku streaming — each token sent IMMEDIATELY ────────────────────
+
+async function streamClaudeResponse(ws, history) {
+  const startMs = Date.now();
+
+  try {
+    const stream = await anthropic.messages.stream({
+      model: 'claude-haiku-4-5-20250929',
+      max_tokens: 150,
+      system: VOICE_SYSTEM_PROMPT,
+      messages: history,
+    });
+
+    let fullResponse = '';
+
+    for await (const event of stream) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        const token = event.delta.text;
+        fullResponse += token;
+
+        // Send each token IMMEDIATELY — no buffering
+        safeSend(ws, { type: 'text', token: token, last: false });
+      }
+    }
+
+    // Signal end of response
+    safeSend(ws, { type: 'text', token: '', last: true });
+
+    const ms = Date.now() - startMs;
+    console.log(`🤖 AI [${ms}ms]: "${fullResponse.substring(0, 120)}"`);
+
+    history.push({ role: 'assistant', content: fullResponse });
+  } catch (err) {
+    console.error('❌ Claude stream error:', err.message, err.stack);
+    safeSend(ws, {
+      type: 'text',
+      token: "I'm sorry, I had a brief hiccup. Could you say that again?",
+      last: true,
+    });
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FALLBACK: Gather + Say (if ConversationRelay doesn't work on this account)
+// ══════════════════════════════════════════════════════════════════════════════
+
+function handleGather(req, res) {
+  try {
+    const callId = req.query.callId || '';
+    let greeting = DEFAULT_GREETING;
+
+    if (callId) {
+      const session = activeCallSessions.get(callId);
+      if (session && session.initialMessage) {
+        greeting = session.initialMessage;
+      }
+    }
+
+    console.log(`📞 Gather TwiML: callId=${callId || 'inbound'}`);
+
+    res.type('text/xml').send(
+`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" speechTimeout="auto" action="/webhook/voice/respond?callId=${encodeURIComponent(callId)}" method="POST">
+    <Say voice="Google.en-US-Neural2-F">${escapeXml(greeting)}</Say>
+  </Gather>
+  <Say voice="Google.en-US-Neural2-F">I didn't hear anything. Goodbye!</Say>
+</Response>`);
+  } catch (err) {
+    console.error('❌ Gather TwiML error:', err.message);
+    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, something went wrong.</Say></Response>');
+  }
+}
+
+router.get('/gather', handleGather);
+router.post('/gather', handleGather);
+
+router.post('/respond', async (req, res) => {
+  try {
+    const callId = req.query.callId || '';
+    const speech = req.body.SpeechResult;
+
+    if (!speech) {
+      console.log('📞 Gather: no speech detected');
+      res.type('text/xml').send(
+`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" speechTimeout="auto" action="/webhook/voice/respond?callId=${encodeURIComponent(callId)}" method="POST">
+    <Say voice="Google.en-US-Neural2-F">I didn't catch that. Could you try again?</Say>
+  </Gather>
+  <Say voice="Google.en-US-Neural2-F">Goodbye!</Say>
+</Response>`);
+      return;
+    }
+
+    console.log(`🎙️ Gather speech: "${speech}"`);
+
+    // Get or create history for this call
+    const session = callId ? activeCallSessions.get(callId) : null;
+    const history = session ? session.history : [];
+
+    history.push({ role: 'user', content: speech });
+
+    // Non-streaming Claude call (Gather+Say needs full response upfront)
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20250929',
+      max_tokens: 150,
+      system: VOICE_SYSTEM_PROMPT,
+      messages: history,
+    });
+
+    const aiText = response.content[0]?.text || "I'm sorry, could you say that again?";
+    history.push({ role: 'assistant', content: aiText });
+
+    console.log(`🤖 AI: "${aiText}"`);
+
+    res.type('text/xml').send(
+`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" speechTimeout="auto" action="/webhook/voice/respond?callId=${encodeURIComponent(callId)}" method="POST">
+    <Say voice="Google.en-US-Neural2-F">${escapeXml(aiText)}</Say>
+  </Gather>
+  <Say voice="Google.en-US-Neural2-F">Are you still there?</Say>
+  <Gather input="speech" speechTimeout="auto" action="/webhook/voice/respond?callId=${encodeURIComponent(callId)}" method="POST"></Gather>
+  <Say voice="Google.en-US-Neural2-F">Alright, goodbye!</Say>
+</Response>`);
+  } catch (err) {
+    console.error('❌ Gather respond error:', err.message, err.stack);
+    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="Google.en-US-Neural2-F">Sorry, I had a technical issue. Goodbye!</Say></Response>');
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CALL STATUS + ADMIN ENDPOINTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+router.post('/status', async (req, res) => {
+  const callId = req.query.callId;
+  const status = req.body.CallStatus;
+  console.log(`📞 Status: callId=${callId}, status=${status}`);
+  res.sendStatus(200);
+
+  const session = activeCallSessions.get(callId);
+  if (!session) return;
+
+  try {
+    if (status === 'completed' && session.history.length > 0) {
+      sendCallSummary(session).catch(err => console.error('❌ Summary error:', err.message));
+    } else if (['busy', 'no-answer', 'failed'].includes(status)) {
+      sendCallFailureNotice(session, status).catch(err => console.error('❌ Failure notice error:', err.message));
+    }
+  } catch (err) {
+    console.error('❌ Status handler error:', err.message);
+  } finally {
+    activeCallSessions.delete(callId);
+  }
+});
+
+// Admin diagnostic endpoints
+function requireAdminAuth(req, res, next) {
+  try {
+    const jwt = require('jsonwebtoken');
+    const header = req.headers.authorization;
+    if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Auth required' });
     const decoded = jwt.verify(header.slice(7), process.env.JWT_SECRET, { algorithms: ['HS256'] });
     if (!decoded.adminId) return res.status(403).json({ error: 'Admin only' });
     next();
-  } catch { res.status(401).json({ error: 'Invalid token' }); }
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
+  }
 }
 
-// ── Diagnostic endpoints (admin only) ───────────────────────────────────────
-
 router.get('/test-call', requireAdminAuth, async (req, res) => {
-  const { makeCall } = require('../services/twilio-voice');
-  const to = req.query.to;
-  if (!to) return res.status(400).json({ error: 'Missing ?to= parameter' });
   try {
+    const { makeCall } = require('../services/twilio-voice');
+    const to = req.query.to;
+    if (!to) return res.status(400).json({ error: 'Missing ?to= parameter' });
     const result = await makeCall({
       to,
       message: 'Hi, this is Kova. Just a quick test call. How are you?',
-      purpose: 'Test call to verify voice system works end-to-end',
+      purpose: 'Test call to verify voice system',
       customerId: 1,
     });
     res.json({ success: true, ...result, activeSessions: activeCallSessions.size });
@@ -88,7 +331,6 @@ router.get('/debug', requireAdminAuth, (req, res) => {
   for (const [id, s] of activeCallSessions) {
     sessions.push({
       callId: id, to: s.to, purpose: s.purpose,
-      voiceId: s.customVoiceId || ELEVENLABS_DEFAULT_VOICE,
       historyLen: s.history.length,
       age: Math.round((Date.now() - s.createdAt) / 1000) + 's',
     });
@@ -96,204 +338,7 @@ router.get('/debug', requireAdminAuth, (req, res) => {
   res.json({ activeSessions: sessions.length, sessions });
 });
 
-// ── POST /voice/outbound — returns ConversationRelay TwiML ──────────────────
-router.post('/outbound', validateTwilioVoiceSignature, async (req, res) => {
-  const callId = req.query.callId;
-  console.log(`📞 Webhook: callId=${callId}, sessions=${activeCallSessions.size}`);
-
-  try {
-    const session = activeCallSessions.get(callId);
-    if (!session) {
-      console.error(`❌ No session for callId=${callId}`);
-      res.type('text/xml').send(
-        `<Response><Say voice="Polly.Ruth-Generative">Sorry, I couldn't connect this call.</Say></Response>`
-      );
-      return;
-    }
-
-    const masterApiUrl = process.env.MASTER_API_URL;
-    const wsUrl = masterApiUrl
-      .replace('https://', 'wss://')
-      .replace('http://', 'ws://');
-
-    // Use customer's cloned voice or ElevenLabs Rachel default
-    const voiceId = session.customVoiceId || ELEVENLABS_DEFAULT_VOICE;
-    const greeting = escapeXml(session.initialMessage);
-
-    console.log(`📞 ConversationRelay: voiceId=${voiceId}, clone=${!!session.customVoiceId}`);
-
-    res.type('text/xml').send(
-`<Response>
-  <Connect>
-    <ConversationRelay url="${wsUrl}/voice-ws?callId=${encodeURIComponent(callId)}" ttsProvider="ElevenLabs" voice="${voiceId}" elevenlabsTextNormalization="on" interruptible="true" dtmfDetection="true" welcomeGreeting="${greeting}" />
-  </Connect>
-</Response>`);
-
-  } catch (err) {
-    console.error(`❌ Outbound TwiML error (${callId}):`, err.message);
-    res.type('text/xml').send(
-      `<Response><Say voice="Polly.Ruth-Generative">Sorry, something went wrong. Please try again later.</Say></Response>`
-    );
-  }
-});
-
-// ── POST /voice/status — call lifecycle ─────────────────────────────────────
-router.post('/status', validateTwilioVoiceSignature, async (req, res) => {
-  const callId = req.query.callId;
-  const status = req.body.CallStatus;
-  console.log(`📞 Status (${callId}): ${status}`);
-  res.sendStatus(200);
-
-  const session = activeCallSessions.get(callId);
-  if (!session) return;
-
-  try {
-    if (status === 'completed' && session.history.length > 0) {
-      sendCallSummary(session).catch(err => console.error('Summary error:', err.message));
-    } else if (['busy', 'no-answer', 'failed'].includes(status)) {
-      sendCallFailureNotice(session, status).catch(err => console.error('Failure notice error:', err.message));
-    }
-  } catch (err) {
-    console.error(`❌ Status handler error (${callId}):`, err.message);
-  } finally {
-    activeCallSessions.delete(callId);
-  }
-});
-
-// ── WebSocket handler for ConversationRelay ─────────────────────────────────
-
-function handleVoiceWebSocket(ws, callId) {
-  try {
-    const session = activeCallSessions.get(callId);
-    if (!session) {
-      console.error(`❌ WS: No session for callId=${callId}`);
-      ws.close();
-      return;
-    }
-
-    console.log(`🔌 WS connected: callId=${callId}, to=${session.to}`);
-
-    ws.on('message', async (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-
-        if (msg.type === 'setup') {
-          console.log(`✅ ConversationRelay setup (${callId}): callSid=${msg.callSid || 'n/a'}`);
-        } else if (msg.type === 'prompt') {
-          const speech = msg.voicePrompt;
-          console.log(`🎙️ (${callId}): "${speech}"`);
-          session.history.push({ role: 'user', content: speech });
-          await streamClaudeResponse(ws, session, callId);
-        } else if (msg.type === 'interrupt') {
-          console.log(`⚡ Barge-in (${callId})`);
-        } else if (msg.type === 'dtmf') {
-          console.log(`🔢 DTMF (${callId}): ${msg.digit}`);
-        } else if (msg.type === 'error') {
-          console.error(`❌ ConversationRelay error (${callId}):`, msg.description || JSON.stringify(msg));
-        }
-      } catch (err) {
-        console.error(`❌ WS message error (${callId}):`, err.message, err.stack);
-        try {
-          ws.send(JSON.stringify({
-            type: 'text',
-            token: "I'm sorry, I had a brief hiccup. Could you say that again?",
-            last: true,
-          }));
-        } catch (sendErr) {
-          console.error(`❌ WS fallback send failed (${callId}):`, sendErr.message);
-        }
-      }
-    });
-
-    ws.on('close', (code, reason) => {
-      console.log(`🔌 WS closed: callId=${callId}, code=${code}, reason=${reason || 'none'}`);
-    });
-
-    ws.on('error', (err) => {
-      console.error(`❌ WS error (${callId}):`, err.message, err.stack);
-    });
-
-  } catch (err) {
-    console.error(`❌ WS handler setup error (${callId}):`, err.message, err.stack);
-    try { ws.close(); } catch {}
-  }
-}
-
-// ── Claude Haiku streaming — each token sent IMMEDIATELY ────────────────────
-
-async function streamClaudeResponse(ws, session, callId) {
-  const startMs = Date.now();
-
-  try {
-    const stream = await anthropic.messages.stream({
-      model: 'claude-haiku-4-5-20250929',
-      max_tokens: 150,
-      system: VOICE_SYSTEM_PROMPT,
-      messages: session.history,
-    });
-
-    let fullResponse = '';
-
-    for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        const token = event.delta.text;
-        fullResponse += token;
-
-        // Send each token IMMEDIATELY — no buffering
-        try {
-          ws.send(JSON.stringify({
-            type: 'text',
-            token: token,
-            last: false,
-          }));
-        } catch (sendErr) {
-          console.error(`❌ WS send error (${callId}):`, sendErr.message);
-          break;
-        }
-      }
-    }
-
-    // Send final empty token to signal end of response
-    try {
-      ws.send(JSON.stringify({
-        type: 'text',
-        token: '',
-        last: true,
-      }));
-    } catch (sendErr) {
-      console.error(`❌ WS final send error (${callId}):`, sendErr.message);
-    }
-
-    const claudeMs = Date.now() - startMs;
-
-    // Store clean response in history
-    const endCall = fullResponse.includes('[END_CALL]');
-    const cleanText = fullResponse.replace(/\[END_CALL\]/g, '').trim();
-    session.history.push({ role: 'assistant', content: cleanText });
-    console.log(`🤖 AI (${callId}): "${cleanText}" [${claudeMs}ms, end=${endCall}]`);
-
-    // End call if Claude signaled it
-    if (endCall) {
-      setTimeout(() => {
-        try { ws.send(JSON.stringify({ type: 'end' })); } catch {}
-      }, 4000);
-    }
-
-  } catch (err) {
-    console.error(`❌ Claude stream error (${callId}):`, err.message, err.stack);
-    try {
-      ws.send(JSON.stringify({
-        type: 'text',
-        token: "I'm sorry, I had a brief hiccup. Could you say that again?",
-        last: true,
-      }));
-    } catch (sendErr) {
-      console.error(`❌ WS fallback send failed (${callId}):`, sendErr.message);
-    }
-  }
-}
-
-// ── Post-call notifications (async, never blocks) ───────────────────────────
+// ── Post-call notifications ─────────────────────────────────────────────────
 
 async function sendCallSummary(session) {
   try {
@@ -314,7 +359,11 @@ async function sendCallSummary(session) {
       const twilio = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
       const from = process.env.TWILIO_WHATSAPP_NUMBER;
       if (from) {
-        await twilio.messages.create({ from: `whatsapp:${from}`, to: `whatsapp:${session.customerWhatsappFrom}`, body: msg });
+        await twilio.messages.create({
+          from: `whatsapp:${from}`,
+          to: `whatsapp:${session.customerWhatsappFrom}`,
+          body: msg,
+        });
       }
     }
 
@@ -325,7 +374,9 @@ async function sendCallSummary(session) {
          JSON.stringify({ purpose: session.purpose, turns: session.history.length, transcript })]
       ).catch(() => {});
     }
-  } catch (err) { console.error('❌ Summary error:', err.message); }
+  } catch (err) {
+    console.error('❌ Summary error:', err.message);
+  }
 }
 
 async function sendCallFailureNotice(session, status) {
@@ -336,14 +387,19 @@ async function sendCallFailureNotice(session, status) {
     if (!from) return;
     const reason = status === 'busy' ? 'Line was busy' : status === 'no-answer' ? 'No answer' : 'Call failed';
     await twilio.messages.create({
-      from: `whatsapp:${from}`, to: `whatsapp:${session.customerWhatsappFrom}`,
+      from: `whatsapp:${from}`,
+      to: `whatsapp:${session.customerWhatsappFrom}`,
       body: `📞 Call to ${session.to}: ${reason}. Want me to try again?`,
     });
     if (session.customerId) {
-      pool.query('INSERT INTO activity_log (customer_id, event_type, description) VALUES ($1, $2, $3)',
-        [session.customerId, 'voice_call_failed', `Call to ${session.to}: ${reason}`]).catch(() => {});
+      pool.query(
+        'INSERT INTO activity_log (customer_id, event_type, description) VALUES ($1, $2, $3)',
+        [session.customerId, 'voice_call_failed', `Call to ${session.to}: ${reason}`]
+      ).catch(() => {});
     }
-  } catch (err) { console.error('❌ Failure notice error:', err.message); }
+  } catch (err) {
+    console.error('❌ Failure notice error:', err.message);
+  }
 }
 
 // Export router + WebSocket handler

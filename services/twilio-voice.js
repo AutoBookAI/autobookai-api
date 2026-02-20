@@ -169,8 +169,8 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
   const call = await client.calls.create({
     to,
     from: callerNumber,
-    url: `${masterApiUrl}/voice/outbound?callId=${encodeURIComponent(callId)}`,
-    statusCallback: `${masterApiUrl}/voice/status?callId=${encodeURIComponent(callId)}`,
+    url: `${masterApiUrl}/webhook/voice?callId=${encodeURIComponent(callId)}`,
+    statusCallback: `${masterApiUrl}/webhook/voice/status?callId=${encodeURIComponent(callId)}`,
     statusCallbackEvent: ['completed', 'failed', 'busy', 'no-answer'],
   });
 
