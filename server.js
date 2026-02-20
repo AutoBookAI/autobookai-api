@@ -1,13 +1,32 @@
 require('dotenv').config();
+const http      = require('http');
 const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path      = require('path');
 const os        = require('os');
+const { WebSocketServer } = require('ws');
 const { pool, initDB } = require('./db');
+const { handleVoiceWebSocket } = require('./routes/voice-webhook');
 
 const app = express();
+const server = http.createServer(app);
+
+// ── WebSocket server for ConversationRelay ──────────────────────────────────
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  const url = new URL(request.url, 'http://localhost');
+  if (url.pathname === '/voice-ws') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      console.log('[WS] Voice WebSocket connected');
+      handleVoiceWebSocket(ws, request);
+    });
+  } else {
+    socket.destroy();
+  }
+});
 
 // ── Trust proxy (Railway sits behind a reverse proxy) ─────────────────────────
 app.set('trust proxy', 1);
@@ -29,14 +48,14 @@ app.use(
   require('./routes/whatsapp-webhook')
 );
 
-// ── Twilio Voice webhook — Gather + ElevenLabs Play ─────────────────────────────
+// ── Twilio Voice webhook — ConversationRelay TwiML ──────────────────────────────
 app.use(
   '/webhook/voice',
   express.urlencoded({ extended: true }),
   require('./routes/voice-webhook')
 );
 
-// ── Serve generated voice audio files ───────────────────────────────────────────
+// ── Serve generated voice audio files (legacy, kept for compatibility) ──────────
 app.use('/voice-audio', express.static(path.join(os.tmpdir(), 'voice-audio')));
 
 // ── Standard middleware ────────────────────────────────────────────────────────
@@ -85,6 +104,6 @@ app.get('/', (_, res) => res.json({ service: 'WhatsApp AI Assistant API', versio
 const PORT = process.env.PORT || 8080;
 initDB()
   .then(() => {
-    app.listen(PORT, () => console.log(`🚀 API running on port ${PORT}`));
+    server.listen(PORT, () => console.log(`🚀 API running on port ${PORT}`));
   })
   .catch(err => { console.error('DB init failed:', err); process.exit(1); });
