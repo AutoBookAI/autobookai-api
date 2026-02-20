@@ -4,9 +4,9 @@
  * Endpoints:
  *   POST /voice/outbound  — Initial connect + each speech turn
  *   POST /voice/status    — Call status updates
- *   GET  /voice/audio/:id — Serve TTS audio clips
  *
- * TTS: ElevenLabs → OpenAI tts-1-hd → Twilio <Say> fallback
+ * TTS: Amazon Polly Generative voices via Twilio <Say> (no extra API key)
+ *      Ruth-Generative (female), Matthew-Generative (male)
  * STT: Twilio enhanced speech recognition
  * AI:  Claude Haiku (fast) with natural conversational prompt
  *
@@ -17,37 +17,15 @@ const router = require('express').Router();
 const Anthropic = require('@anthropic-ai/sdk');
 const { pool } = require('../db');
 const { activeCallSessions, escapeXml } = require('../services/twilio-voice');
-const { generateSpeech, getAudio, isConfigured: ttsConfigured } = require('../services/voice-tts');
 
 const anthropic = new Anthropic();
 
-// ── TTS helpers ──────────────────────────────────────────────────────────────
-
-async function speak(text, session) {
-  if (ttsConfigured()) {
-    const gender = session.voiceGender || 'female';
-    const audioId = await generateSpeech(text, gender);
-    if (audioId) {
-      const base = process.env.MASTER_API_URL;
-      return `<Play>${base}/voice/audio/${audioId}</Play>`;
-    }
-  }
-  const v = session.voice || 'Google.en-US-Neural2-F';
-  return `<Say voice="${v}">${escapeXml(text)}</Say>`;
-}
+// ── TTS helper ───────────────────────────────────────────────────────────────
 
 function say(text, session) {
-  const v = session.voice || 'Google.en-US-Neural2-F';
+  const v = session.voice || 'Polly.Ruth-Generative';
   return `<Say voice="${v}">${escapeXml(text)}</Say>`;
 }
-
-// ── Audio endpoint ──────────────────────────────────────────────────────────
-router.get('/audio/:id', (req, res) => {
-  const buf = getAudio(req.params.id);
-  if (!buf) return res.sendStatus(404);
-  res.set({ 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-cache' });
-  res.send(buf);
-});
 
 // ── POST /voice/outbound ────────────────────────────────────────────────────
 router.post('/outbound', async (req, res) => {
@@ -67,7 +45,7 @@ router.post('/outbound', async (req, res) => {
     if (!speech) {
       // Call just connected — deliver greeting
       console.log(`📞 Connected (${callId})`);
-      const greeting = await speak(session.initialMessage, session);
+      const greeting = say(session.initialMessage, session);
       res.type('text/xml').send(
 `<Response>
   ${greeting}
@@ -88,7 +66,7 @@ router.post('/outbound', async (req, res) => {
       session.history.push({ role: 'assistant', content: ai.text });
       console.log(`🤖 AI (${callId}): "${ai.text}" [end=${ai.endCall}]`);
 
-      const twiml = await speak(ai.text, session);
+      const twiml = say(ai.text, session);
 
       if (ai.endCall) {
         res.type('text/xml').send(`<Response>${twiml}</Response>`);

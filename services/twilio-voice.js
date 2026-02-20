@@ -32,18 +32,19 @@ const ALLOWED_VOICES = new Set([
   'Polly.Ivy', 'Polly.Justin', 'Polly.Ruth', 'Polly.Stephen',
   'Google.en-US-Standard-A', 'Google.en-US-Standard-B',
   'Google.en-US-Standard-C', 'Google.en-US-Standard-D',
-  // Neural / natural-sounding voices
   'Google.en-US-Neural2-F', 'Google.en-US-Neural2-D',
   'Google.en-US-Neural2-A', 'Google.en-US-Neural2-C',
   'Polly.Joanna-Neural', 'Polly.Matthew-Neural',
+  // Amazon Polly Generative — most human-sounding, no extra API key needed
+  'Polly.Ruth-Generative', 'Polly.Matthew-Generative',
 ]);
 
-// Map customer's Kova voice preference to a natural-sounding TTS voice
+// Map customer's Kova voice preference to Amazon Polly Generative voices
 const VOICE_FOR_PREFERENCE = {
-  'Kova (Female)': 'Google.en-US-Neural2-F',
-  'Kova (Male)':   'Google.en-US-Neural2-D',
+  'Kova (Female)': 'Polly.Ruth-Generative',
+  'Kova (Male)':   'Polly.Matthew-Generative',
 };
-const DEFAULT_VOICE = 'Google.en-US-Neural2-F';
+const DEFAULT_VOICE = 'Polly.Ruth-Generative';
 
 // ── Active call sessions ────────────────────────────────────────────────────
 // Keyed by callId (UUID). Each session holds conversation state for the voice webhook.
