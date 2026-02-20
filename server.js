@@ -27,6 +27,13 @@ app.use(
   require('./routes/whatsapp-webhook')
 );
 
+// ── Twilio Voice webhooks — conversational AI calls ─────────────────────────────
+app.use(
+  '/voice',
+  express.urlencoded({ extended: false }),
+  require('./routes/voice-webhook')
+);
+
 // ── Standard middleware ────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10kb' })); // Prevent large payload attacks
 app.use(cors({

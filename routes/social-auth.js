@@ -59,6 +59,15 @@ const PROVIDERS = {
     clientIdEnv: 'INSTAGRAM_CLIENT_ID',
     clientSecretEnv: 'INSTAGRAM_CLIENT_SECRET',
   },
+  tiktok: {
+    authUrl: 'https://www.tiktok.com/v2/auth/authorize/',
+    tokenUrl: 'https://open.tiktokapis.com/v2/oauth/token/',
+    userInfoUrl: 'https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url',
+    scope: 'user.info.basic',
+    clientIdEnv: 'TIKTOK_CLIENT_KEY',
+    clientSecretEnv: 'TIKTOK_CLIENT_SECRET',
+    responseType: 'code',
+  },
 };
 
 // GET /api/auth/:provider — redirect to OAuth consent screen
@@ -74,13 +83,20 @@ router.get('/:provider', (req, res) => {
   }
 
   const redirectUri = `${CALLBACK_BASE()}/api/auth/${req.params.provider}/callback`;
+  const state = req.query.signup === 'true' ? 'signup' : 'login';
   const params = new URLSearchParams({
-    client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
     scope: provider.scope,
-    state: req.query.signup === 'true' ? 'signup' : 'login',
+    state,
   });
+
+  // TikTok uses client_key instead of client_id
+  if (req.params.provider === 'tiktok') {
+    params.set('client_key', clientId);
+  } else {
+    params.set('client_id', clientId);
+  }
 
   if (provider.responseMode) params.set('response_mode', provider.responseMode);
 
@@ -104,15 +120,29 @@ router.get('/:provider/callback', async (req, res) => {
     const redirectUri = `${CALLBACK_BASE()}/api/auth/${providerName}/callback`;
 
     // Exchange code for access token
-    const tokenRes = await axios.post(provider.tokenUrl, new URLSearchParams({
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: redirectUri,
-      client_id: clientId,
-      client_secret: clientSecret,
-    }).toString(), {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    });
+    let tokenRes;
+    if (providerName === 'tiktok') {
+      // TikTok uses JSON body and different field names
+      tokenRes = await axios.post(provider.tokenUrl, {
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+        client_key: clientId,
+        client_secret: clientSecret,
+      }, {
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      });
+    } else {
+      tokenRes = await axios.post(provider.tokenUrl, new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+        client_id: clientId,
+        client_secret: clientSecret,
+      }).toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      });
+    }
 
     const accessToken = tokenRes.data.access_token;
     if (!accessToken) throw new Error('No access token received');
@@ -126,6 +156,14 @@ router.get('/:provider/callback', async (req, res) => {
       const payload = JSON.parse(Buffer.from(idToken.split('.')[1], 'base64').toString());
       email = payload.email;
       name = email.split('@')[0]; // Apple often doesn't provide name
+    } else if (providerName === 'tiktok') {
+      // TikTok returns user info in a nested data object
+      const profileRes = await axios.get(provider.userInfoUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const userData = profileRes.data?.data?.user || {};
+      name = userData.display_name || `tiktok_${userData.open_id?.slice(0, 8)}`;
+      email = `${userData.open_id}@tiktok.user`; // TikTok doesn't expose email
     } else if (provider.userInfoUrl) {
       const profileRes = await axios.get(provider.userInfoUrl, {
         headers: { Authorization: `Bearer ${accessToken}` },

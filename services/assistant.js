@@ -35,15 +35,16 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'make_phone_call',
-    description: 'Make an outbound phone call and speak a message via text-to-speech.',
+    description: 'Make an outbound phone call and have a real two-way conversation. The AI will call the number, deliver your initial message, then listen and respond naturally in a back-and-forth conversation. Use this for booking reservations, canceling appointments, making inquiries, or any task that requires a phone conversation. A summary will be sent via WhatsApp when the call ends.',
     input_schema: {
       type: 'object',
       properties: {
         to:      { type: 'string', description: 'Phone number in E.164 format (e.g. +14155551234)' },
-        message: { type: 'string', description: 'Message to speak to the recipient' },
+        message: { type: 'string', description: 'Initial greeting to speak when the call connects' },
+        purpose: { type: 'string', description: 'The goal of this call — what should be accomplished (e.g. "book a table for 4 at 7pm tonight", "cancel the appointment on Friday")' },
         voice:   { type: 'string', description: 'TTS voice (default: Polly.Joanna)' },
       },
-      required: ['to', 'message'],
+      required: ['to', 'message', 'purpose'],
     },
   },
   {
@@ -155,8 +156,14 @@ async function executeTool(customerId, toolName, toolInput) {
 
     case 'make_phone_call': {
       const { makeCall } = require('./twilio-voice');
-      const result = await makeCall({ to: toolInput.to, message: toolInput.message, voice: toolInput.voice });
-      logActivity(customerId, 'phone_call', `Call placed to ${toolInput.to}`);
+      const result = await makeCall({
+        to: toolInput.to,
+        message: toolInput.message,
+        purpose: toolInput.purpose,
+        voice: toolInput.voice,
+        customerId,
+      });
+      logActivity(customerId, 'phone_call', `Conversational call to ${toolInput.to}: ${toolInput.purpose || toolInput.message}`);
       return result;
     }
 
