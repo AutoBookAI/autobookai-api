@@ -17,13 +17,32 @@ const { pool } = require('../db');
 router.get('/status', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT voice_clone_id FROM customer_profiles WHERE customer_id=$1',
+      'SELECT voice_clone_id, voice_onboarding_shown FROM customer_profiles WHERE customer_id=$1',
       [req.customerId]
     );
-    const voiceId = result.rows[0]?.voice_clone_id || null;
-    res.json({ hasVoice: !!voiceId, voiceId });
+    const row = result.rows[0] || {};
+    const voiceId = row.voice_clone_id || null;
+    res.json({
+      hasVoice: !!voiceId,
+      voiceId,
+      onboardingShown: !!row.voice_onboarding_shown,
+      elevenlabsAvailable: !!process.env.ELEVENLABS_API_KEY,
+    });
   } catch {
     res.status(500).json({ error: 'Failed to check voice status' });
+  }
+});
+
+// ── POST /api/customer/voice/onboarding-shown — mark onboarding as seen ─────
+router.post('/onboarding-shown', async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE customer_profiles SET voice_onboarding_shown=TRUE, updated_at=NOW() WHERE customer_id=$1',
+      [req.customerId]
+    );
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Failed to update onboarding status' });
   }
 });
 

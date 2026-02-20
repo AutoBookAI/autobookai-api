@@ -142,6 +142,7 @@ async function initDB() {
       ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS assistant_name VARCHAR(100);
       ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS voice_clone_id VARCHAR(255);
       ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS voice_sample_url TEXT;
+      ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS voice_onboarding_shown BOOLEAN DEFAULT FALSE;
 
       -- Encrypted fields need TEXT, not VARCHAR(50) — ciphertext is ~90+ chars
       ALTER TABLE customer_profiles ALTER COLUMN date_of_birth TYPE TEXT;
