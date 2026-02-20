@@ -18,6 +18,30 @@ const { activeCallSessions, escapeXml, makeCall } = require('../services/twilio-
 
 const anthropic = new Anthropic();
 
+// ── Twilio signature verification for voice webhooks ──────────────────────
+function validateTwilioVoiceSignature(req, res, next) {
+  const twilio = require('twilio');
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!authToken) return next(); // Skip in dev if not configured
+
+  const baseUrl = process.env.MASTER_API_URL;
+  if (!baseUrl) return next();
+
+  const webhookUrl = `${baseUrl}${req.originalUrl}`;
+  const signature = req.headers['x-twilio-signature'];
+  if (!signature) {
+    console.warn('Missing X-Twilio-Signature on voice webhook');
+    return res.type('text/xml').status(403).send('<Response/>');
+  }
+
+  const isValid = twilio.validateRequest(authToken, signature, webhookUrl, req.body);
+  if (!isValid) {
+    console.warn('Invalid Twilio signature on voice webhook — rejecting');
+    return res.type('text/xml').status(403).send('<Response/>');
+  }
+  next();
+}
+
 // ── TTS helper ───────────────────────────────────────────────────────────────
 
 function say(text, session) {
@@ -59,7 +83,7 @@ router.get('/debug', (req, res) => {
 });
 
 // ── POST /voice/outbound ────────────────────────────────────────────────────
-router.post('/outbound', async (req, res) => {
+router.post('/outbound', validateTwilioVoiceSignature, async (req, res) => {
   const callId = req.query.callId;
   console.log(`📞 Voice webhook hit: callId=${callId}, activeSessions=${activeCallSessions.size}`);
 
@@ -117,7 +141,7 @@ router.post('/outbound', async (req, res) => {
 });
 
 // ── POST /voice/status ──────────────────────────────────────────────────────
-router.post('/status', async (req, res) => {
+router.post('/status', validateTwilioVoiceSignature, async (req, res) => {
   const callId = req.query.callId;
   const status = req.body.CallStatus;
   console.log(`📞 Call status (${callId}): ${status}`);

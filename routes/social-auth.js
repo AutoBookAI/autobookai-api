@@ -165,6 +165,14 @@ router.get('/:provider/callback', async (req, res) => {
       const userData = profileRes.data?.data?.user || {};
       name = userData.display_name || `tiktok_${userData.open_id?.slice(0, 8)}`;
       email = `${userData.open_id}@tiktok.user`; // TikTok doesn't expose email
+    } else if (providerName === 'instagram') {
+      // Instagram Basic Display API doesn't return email — use username as identifier
+      const profileRes = await axios.get(provider.userInfoUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const username = profileRes.data.username || profileRes.data.id;
+      name = username;
+      email = `${username}@instagram.user`; // Instagram doesn't expose email
     } else if (provider.userInfoUrl) {
       const profileRes = await axios.get(provider.userInfoUrl, {
         headers: { Authorization: `Bearer ${accessToken}` },
