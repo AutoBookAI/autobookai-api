@@ -4,46 +4,32 @@
  * When the AI makes an outbound call, Twilio hits these endpoints:
  *   POST /voice/outbound  — Initial connect + each speech turn
  *   POST /voice/status    — Call status updates (completed, failed, etc.)
- *   GET  /audio/:id       — Serve ElevenLabs-generated audio clips
+ *   GET  /audio/:id       — Serve OpenAI TTS audio clips
  *
  * The conversation flow:
- *   1. Call connects → speak greeting → <Gather> to listen
- *   2. Person speaks → Twilio transcribes → we send to Claude → speak response → <Gather>
+ *   1. Call connects → speak greeting (OpenAI TTS) → <Gather> to listen
+ *   2. Person speaks → Twilio transcribes → Claude generates response → OpenAI TTS → <Gather>
  *   3. Repeat until Claude signals [END_CALL] or person hangs up
  *   4. Status callback sends WhatsApp summary to customer
  *
- * TTS priority: ElevenLabs (if ELEVENLABS_API_KEY set) → Twilio Neural2 fallback
+ * TTS: OpenAI tts-1-hd (nova/echo) → falls back to Twilio Neural2 if no OPENAI_API_KEY
  */
 
 const router = require('express').Router();
 const Anthropic = require('@anthropic-ai/sdk');
 const { pool } = require('../db');
 const { activeCallSessions, escapeXml } = require('../services/twilio-voice');
-const { generateSpeech, getAudio, isConfigured: elevenLabsConfigured } = require('../services/elevenlabs-tts');
+const { generateSpeech, getAudio, isConfigured: openaiTtsConfigured } = require('../services/voice-tts');
 
 const anthropic = new Anthropic();
 
 // ── TTS helpers ──────────────────────────────────────────────────────────────
 
-// Wrap text in SSML prosody for natural pacing (Twilio fallback only)
-function ssml(text) {
-  const escaped = escapeXml(text);
-  const withPauses = escaped
-    .replace(/\. /g, '. <break time="250ms"/> ')
-    .replace(/\? /g, '? <break time="300ms"/> ')
-    .replace(/! /g, '! <break time="250ms"/> ');
-  return `<speak><prosody rate="94%">${withPauses}</prosody></speak>`;
-}
-
 /**
- * Generate TwiML speech element — tries ElevenLabs first, falls back to Twilio <Say>.
- *
- * @param {string} text - Text to speak
- * @param {object} session - Call session (for voice/gender info)
- * @returns {string} TwiML fragment (<Play> or <Say>)
+ * Generate TwiML speech — OpenAI TTS via <Play>, or Twilio <Say> fallback.
  */
 async function speak(text, session) {
-  if (elevenLabsConfigured()) {
+  if (openaiTtsConfigured()) {
     const gender = session.voiceGender || 'female';
     const audioId = await generateSpeech(text, gender);
     if (audioId) {
@@ -53,16 +39,17 @@ async function speak(text, session) {
   }
   // Fallback to Twilio TTS
   const voice = session.voice || 'Google.en-US-Neural2-F';
-  return `<Say voice="${voice}">${ssml(text)}</Say>`;
+  const escaped = escapeXml(text);
+  return `<Say voice="${voice}"><speak><prosody rate="94%">${escaped}</prosody></speak></Say>`;
 }
 
-// Quick Twilio <Say> for short filler phrases (no ElevenLabs needed)
+// Twilio <Say> for short filler/fallback phrases
 function sayQuick(text, session) {
   const voice = session.voice || 'Google.en-US-Neural2-F';
-  return `<Say voice="${voice}">${ssml(text)}</Say>`;
+  return `<Say voice="${voice}">${escapeXml(text)}</Say>`;
 }
 
-// ── GET /audio/:id — Serve ElevenLabs audio clips ───────────────────────────
+// ── GET /audio/:id — Serve TTS audio clips ──────────────────────────────────
 router.get('/audio/:id', (req, res) => {
   const buffer = getAudio(req.params.id);
   if (!buffer) return res.sendStatus(404);
@@ -96,11 +83,11 @@ router.post('/outbound', async (req, res) => {
   <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="auto" language="en-US" enhanced="true">
     <Pause length="10"/>
   </Gather>
-  ${sayQuick("I didn't hear a response. Let me try once more.", session)}
+  ${sayQuick("Hello? I didn't catch that. Let me try once more.", session)}
   <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="5" language="en-US" enhanced="true">
     ${sayQuick("Are you there?", session)}
   </Gather>
-  ${sayQuick("It seems like you're not available. I'll let my client know. Goodbye!", session)}
+  ${sayQuick("It seems like you're not available right now. I'll let my client know. Goodbye!", session)}
 </Response>`
       );
     } else {
@@ -128,11 +115,11 @@ router.post('/outbound', async (req, res) => {
   <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="2" language="en-US" enhanced="true">
     <Pause length="10"/>
   </Gather>
-  ${sayQuick("Are you still there?", session)}
+  ${sayQuick("Hey, are you still there?", session)}
   <Gather input="speech" action="${actionUrl}" method="POST" speechTimeout="3" language="en-US" enhanced="true">
     <Pause length="5"/>
   </Gather>
-  ${sayQuick("I'll end the call now. Thank you for your time. Goodbye!", session)}
+  ${sayQuick("Alright, I'll let you go. Thanks for your time! Bye.", session)}
 </Response>`
         );
       }
@@ -140,7 +127,7 @@ router.post('/outbound', async (req, res) => {
   } catch (err) {
     console.error(`❌ Voice webhook error (callId: ${callId}):`, err.message);
     res.type('text/xml').send(
-      `<Response><Say>I'm sorry, I encountered a technical issue. Goodbye.</Say></Response>`
+      `<Response><Say>I'm sorry, I ran into a technical issue. Goodbye.</Say></Response>`
     );
   }
 });
@@ -171,21 +158,31 @@ router.post('/status', async (req, res) => {
   }
 });
 
-// ── Claude voice response generator (Haiku for speed) ────────────────────────
+// ── Claude voice response generator ──────────────────────────────────────────
 
 async function getVoiceAIResponse(session) {
-  const systemPrompt = `You are Kova, an AI assistant on a live phone call for your client ${session.customerName}.
+  const systemPrompt = `You are Kova, a real person making a phone call on behalf of your client ${session.customerName}.
 
 CALL PURPOSE: ${session.purpose}
 
-${session.profileSummary ? `CLIENT INFO:\n${session.profileSummary}\n` : ''}RULES:
-- This is a LIVE phone call. Be brief and natural.
-- MAX 1-2 sentences per response. Never more.
-- Be conversational, warm, and efficient.
-- Use the client's name and preferences when booking.
-- When the goal is achieved or the person wants to end the call, include [END_CALL] at the end.
-- Only use [END_CALL] on your final goodbye.
-- You are calling on behalf of your client. Don't say you're AI unless asked directly.`;
+${session.profileSummary ? `CLIENT INFO:\n${session.profileSummary}\n` : ''}HOW TO SPEAK:
+- Talk like a real human on a phone call — casual, warm, natural.
+- Use conversational fillers naturally: "Sure thing", "So,", "Right,", "Got it", "Yeah,", "Oh,", "Hmm,", "Alright,".
+- Start some responses with "So," or "Great," or "Oh perfect," — the way a person actually talks.
+- Add natural pauses with commas and ellipses. Say "um" or "uh" occasionally when transitioning thoughts.
+- Keep it to 1-2 sentences. This is a phone call, not an essay.
+- Sound like you're smiling. Be friendly and warm but get to the point.
+- Use contractions: "I'm", "we're", "that's", "I'll", "don't", "can't" — never stiff formal language.
+- When booking, give the client's full name for the reservation.
+- When the goal is done or they want to hang up, add [END_CALL] at the very end.
+- Only use [END_CALL] on your final goodbye. Never mid-conversation.
+- You're calling on behalf of your client. Don't mention AI unless directly asked.
+
+EXAMPLES OF NATURAL SPEECH:
+- "Hi there! So, I'm calling on behalf of ${session.customerName} — we were hoping to book a table for tonight if you have anything available?"
+- "Oh perfect, that works great. Could we do, um, 7:30 for a party of four?"
+- "Got it, yeah that sounds good. The reservation would be under ${session.customerName}."
+- "Alright, thanks so much! We really appreciate it. Have a great evening!"`;
 
   const response = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
@@ -194,7 +191,7 @@ ${session.profileSummary ? `CLIENT INFO:\n${session.profileSummary}\n` : ''}RULE
     messages: session.history,
   });
 
-  const text = response.content[0]?.text || "I'm sorry, could you repeat that?";
+  const text = response.content[0]?.text || "Sorry, could you say that again?";
   const endCall = text.includes('[END_CALL]');
 
   return {
