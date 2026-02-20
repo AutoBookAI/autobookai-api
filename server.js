@@ -30,7 +30,7 @@ app.use(
 // ── Twilio Voice webhook — Gather + Say, pure HTTP ──────────────────────────────
 app.use(
   '/webhook/voice',
-  express.urlencoded({ extended: false }),
+  express.urlencoded({ extended: true }),
   require('./routes/voice-webhook')
 );
 
