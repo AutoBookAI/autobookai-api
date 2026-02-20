@@ -3,6 +3,7 @@ const express = require('express');
 const cors    = require('cors');
 const helmet  = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { WebSocketServer } = require('ws');
 const { pool, initDB } = require('./db');
 
 const app = express();
@@ -27,11 +28,12 @@ app.use(
   require('./routes/whatsapp-webhook')
 );
 
-// ── Twilio Voice webhooks — conversational AI calls ─────────────────────────────
+// ── Twilio Voice webhooks — ConversationRelay ───────────────────────────────────
+const voiceWebhook = require('./routes/voice-webhook');
 app.use(
   '/voice',
   express.urlencoded({ extended: false }),
-  require('./routes/voice-webhook')
+  voiceWebhook
 );
 
 // ── Standard middleware ────────────────────────────────────────────────────────
@@ -81,15 +83,27 @@ app.get('/',       (_, res) => res.json({ service: 'WhatsApp AI Assistant API', 
 const PORT = process.env.PORT || 8080;
 initDB()
   .then(() => {
-    // Pre-generate filler audio for voice calls (non-blocking)
-    require('./services/voice-tts').initFillers().catch(err =>
-      console.warn('Filler init skipped:', err.message)
-    );
-
     const server = app.listen(PORT, () => console.log(`🚀 API running on port ${PORT}`));
+
+    // ── WebSocket server for Twilio ConversationRelay ──────────────────────────
+    const wss = new WebSocketServer({ noServer: true });
+
+    server.on('upgrade', (request, socket, head) => {
+      const url = new URL(request.url, `http://${request.headers.host}`);
+      if (url.pathname === '/voice-ws') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          const callId = url.searchParams.get('callId');
+          console.log(`🔌 WS upgrade: /voice-ws callId=${callId}`);
+          voiceWebhook.handleVoiceWebSocket(ws, callId);
+        });
+      } else {
+        socket.destroy();
+      }
+    });
 
     function shutdown(signal) {
       console.log(`${signal} received. Shutting down gracefully...`);
+      wss.close();
       server.close(async () => {
         try { await pool.end(); } catch {}
         console.log('Shutdown complete.');
