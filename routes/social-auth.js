@@ -82,7 +82,7 @@ router.get('/:provider', (req, res) => {
     );
   }
 
-  const redirectUri = `${CALLBACK_BASE()}/api/auth/${req.params.provider}/callback`;
+  const redirectUri = `${CALLBACK_BASE()}/api/auth/social/${req.params.provider}/callback`;
   const state = req.query.signup === 'true' ? 'signup' : 'login';
   const params = new URLSearchParams({
     redirect_uri: redirectUri,
@@ -117,7 +117,7 @@ router.get('/:provider/callback', async (req, res) => {
   try {
     const clientId = process.env[provider.clientIdEnv];
     const clientSecret = process.env[provider.clientSecretEnv];
-    const redirectUri = `${CALLBACK_BASE()}/api/auth/${providerName}/callback`;
+    const redirectUri = `${CALLBACK_BASE()}/api/auth/social/${providerName}/callback`;
 
     // Exchange code for access token
     let tokenRes;
