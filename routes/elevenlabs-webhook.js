@@ -83,6 +83,18 @@ router.post('/', async (req, res) => {
 
     console.log(`[ELEVENLABS-WEBHOOK] Sent call summary to ${customerWhatsappFrom} for customer ${customerId}`);
 
+    // Update call_memory with outcome and transcript
+    try {
+      await pool.query(
+        `UPDATE call_memory SET call_outcome = $1, call_transcript = $2, updated_at = NOW()
+         WHERE elevenlabs_conversation_id = $3`,
+        [summary, transcriptText, conversation_id]
+      );
+      console.log(`[ELEVENLABS-WEBHOOK] Updated call_memory for conversation ${conversation_id}`);
+    } catch (memErr) {
+      console.error('[ELEVENLABS-WEBHOOK] Failed to update call_memory:', memErr.message);
+    }
+
     // Log to activity_log
     await pool.query(
       `INSERT INTO activity_log (customer_id, event_type, description, metadata)

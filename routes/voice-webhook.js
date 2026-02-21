@@ -320,6 +320,122 @@ function handleFallback(req, res) {
 router.get('/fallback', handleFallback);
 router.post('/fallback', handleFallback);
 
+// ── POST /smart-inbound — Inbound calls with call memory context ───────────
+// Looks up the caller's number in call_memory. If found, forwards to ElevenLabs
+// with context via TwiML <Stream>. If not found, forwards normally.
+// Also notifies the customer on WhatsApp that their contact is calling back.
+
+router.post('/smart-inbound', async (req, res) => {
+  const callerNumber = req.body.From || req.body.Caller || '';
+  const { pool } = require('../db');
+  const agentId = process.env.ELEVENLABS_AGENT_ID;
+
+  if (!agentId) {
+    console.error('[SMART-INBOUND] No ELEVENLABS_AGENT_ID configured');
+    res.type('text/xml').send(xml(`  <Say voice="${FALLBACK_VOICE}">Sorry, calls are not available right now. Please try WhatsApp instead.</Say>\n  <Hangup/>`));
+    return;
+  }
+
+  // Look up recent call history with this number
+  let context = null;
+  try {
+    const result = await pool.query(
+      `SELECT customer_id, customer_whatsapp, business_name, call_purpose, call_task, call_outcome, direction, created_at
+       FROM call_memory
+       WHERE business_phone = $1 AND created_at > NOW() - INTERVAL '7 days'
+       ORDER BY created_at DESC LIMIT 5`,
+      [callerNumber]
+    );
+    if (result.rows.length > 0) {
+      context = result.rows;
+    }
+  } catch (err) {
+    console.error('[SMART-INBOUND] DB lookup error:', err.message);
+  }
+
+  // Log this inbound call
+  try {
+    const custId = context ? context[0].customer_id : null;
+    await pool.query(
+      `INSERT INTO call_memory (customer_id, customer_whatsapp, business_phone, call_purpose, direction)
+       VALUES ($1, $2, $3, $4, 'inbound')`,
+      [custId, context?.[0]?.customer_whatsapp || null, callerNumber, 'Inbound call from ' + callerNumber]
+    );
+  } catch (err) {
+    console.error('[SMART-INBOUND] Failed to log inbound call:', err.message);
+  }
+
+  if (context) {
+    const latestCall = context[0];
+    const contextSummary = context.map(c =>
+      `${c.direction === 'outbound' ? 'We called them' : 'They called us'} about: ${c.call_purpose}${c.call_outcome ? ' — Outcome: ' + c.call_outcome : ''}`
+    ).join('\n');
+
+    // Notify the customer on WhatsApp that their contact is calling back
+    if (latestCall.customer_whatsapp) {
+      try {
+        const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+        const kovaNumber = process.env.TWILIO_PHONE_NUMBER || process.env.KOVA_WHATSAPP_NUMBER;
+        if (kovaNumber) {
+          twilioClient.messages.create({
+            from: `whatsapp:${kovaNumber}`,
+            to: `whatsapp:${latestCall.customer_whatsapp}`,
+            body: `Incoming call from ${callerNumber}${latestCall.business_name ? ' (' + latestCall.business_name + ')' : ''}. This might be about: ${latestCall.call_purpose}. I'm handling it now.`,
+          }).catch(e => console.error('[SMART-INBOUND] WhatsApp notify error:', e.message));
+        }
+      } catch (e) {
+        console.error('[SMART-INBOUND] WhatsApp notify setup error:', e.message);
+      }
+    }
+
+    // Forward to ElevenLabs with context via TwiML Stream
+    const contextJSON = escapeXml(JSON.stringify({
+      caller_number: callerNumber,
+      call_history: contextSummary,
+      customer_name: latestCall.business_name || 'unknown',
+      original_purpose: latestCall.call_purpose,
+      last_outcome: latestCall.call_outcome || 'No outcome recorded yet',
+    }));
+
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://api.elevenlabs.io/v1/convai/conversation/twilio?agent_id=${agentId}">
+      <Parameter name="caller_number" value="${escapeXml(callerNumber)}" />
+      <Parameter name="context" value="${contextJSON}" />
+    </Stream>
+  </Connect>
+</Response>`;
+
+    res.type('text/xml').send(twiml);
+    console.log(`[SMART-INBOUND] Forwarded call from ${callerNumber} to ElevenLabs WITH context (${context.length} history entries)`);
+  } else {
+    // No history — forward to ElevenLabs normally
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://api.elevenlabs.io/v1/convai/conversation/twilio?agent_id=${agentId}">
+    </Stream>
+  </Connect>
+</Response>`;
+
+    res.type('text/xml').send(twiml);
+    console.log(`[SMART-INBOUND] Forwarded call from ${callerNumber} to ElevenLabs (no context)`);
+  }
+});
+
+router.get('/smart-inbound', (req, res) => {
+  // Twilio sometimes sends GET for initial webhook check
+  const agentId = process.env.ELEVENLABS_AGENT_ID;
+  res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://api.elevenlabs.io/v1/convai/conversation/twilio?agent_id=${agentId || ''}">
+    </Stream>
+  </Connect>
+</Response>`);
+});
+
 // ── GET and POST /reject — Polite hang-up for inbound callers ──────────────
 // Inbound calls are not supported. Kova only makes outbound calls on behalf of
 // customers. This endpoint tells callers to use WhatsApp instead.

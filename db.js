@@ -137,6 +137,24 @@ async function initDB() {
         UNIQUE(customer_id, month)
       );
 
+      -- ── Call memory (context for outbound/inbound calls) ────────────────
+      CREATE TABLE IF NOT EXISTS call_memory (
+        id                          SERIAL PRIMARY KEY,
+        customer_id                 INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+        customer_whatsapp           VARCHAR(50),
+        business_phone              VARCHAR(50) NOT NULL,
+        business_name               VARCHAR(255),
+        call_purpose                TEXT NOT NULL,
+        call_task                   TEXT,
+        call_preferences            TEXT,
+        call_outcome                TEXT,
+        call_transcript             TEXT,
+        elevenlabs_conversation_id  VARCHAR(255),
+        direction                   VARCHAR(10) DEFAULT 'outbound',
+        created_at                  TIMESTAMP DEFAULT NOW(),
+        updated_at                  TIMESTAMP DEFAULT NOW()
+      );
+
       -- ── Stripe webhook idempotency ──────────────────────────────────────
       CREATE TABLE IF NOT EXISTS processed_stripe_events (
         event_id     VARCHAR(255) PRIMARY KEY,
@@ -176,6 +194,8 @@ async function initDB() {
       CREATE INDEX IF NOT EXISTS idx_activity_log_customer_id ON activity_log(customer_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_customer_id ON conversations(customer_id);
       CREATE INDEX IF NOT EXISTS idx_usage_tracking_customer_month ON usage_tracking(customer_id, month);
+      CREATE INDEX IF NOT EXISTS idx_call_memory_business_phone ON call_memory(business_phone);
+      CREATE INDEX IF NOT EXISTS idx_call_memory_customer_id ON call_memory(customer_id);
     `);
 
     console.log('✅ Database ready');

@@ -157,6 +157,20 @@ async function makeCall({ to, message, customerId, purpose, task, preferences })
   }
 
   console.log(`📞 ElevenLabs outbound call initiated to ${to} (conversationId: ${conversationId}, callSid: ${callSid})`);
+
+  // Store call context in call_memory for inbound callback awareness
+  try {
+    const { pool } = require('../db');
+    await pool.query(
+      `INSERT INTO call_memory (customer_id, customer_whatsapp, business_phone, business_name, call_purpose, call_task, call_preferences, elevenlabs_conversation_id, direction)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'outbound')`,
+      [customerId, customerWhatsappFrom, to, task || purpose || message, purpose || message, task, preferences, conversationId]
+    );
+    console.log(`[CALL-MEMORY] Stored outbound call context: ${to} for customer ${customerId}`);
+  } catch (memErr) {
+    console.error('[CALL-MEMORY] Failed to store call context:', memErr.message);
+  }
+
   return { conversationId, callSid, status: 'initiated', mode: 'elevenlabs' };
 }
 
