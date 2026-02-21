@@ -349,27 +349,24 @@ async function executeTool(customerId, toolName, toolInput) {
       const OPENCLAW_URL = process.env.OPENCLAW_URL;
       if (!OPENCLAW_URL) throw new Error('OpenClaw is not configured (OPENCLAW_URL not set)');
 
-      // Build the full task message with credentials if requested
+      const { getCredentialsForTask, getRelevantCredentials } = require('./connected-apps');
+
+      // Build the full task message
       let taskMessage = toolInput.task;
       if (toolInput.url) {
         taskMessage = `Start at ${toolInput.url}. ${taskMessage}`;
       }
 
-      // Load connected app credentials if requested
+      // Gather credentials — explicit app or auto-detected from task message
+      let appCredentials = [];
       if (toolInput.credentials_app) {
-        try {
-          const { decrypt } = require('./encryption');
-          const appResult = await pool.query(
-            'SELECT credentials FROM connected_apps WHERE customer_id=$1 AND app_name=$2',
-            [customerId, toolInput.credentials_app]
-          );
-          if (appResult.rows.length) {
-            const creds = JSON.parse(decrypt(appResult.rows[0].credentials, customerId));
-            taskMessage += `\n\nLogin credentials for ${toolInput.credentials_app}: username=${creds.username}, password=${creds.password}`;
-          }
-        } catch (err) {
-          console.warn(`[OPENCLAW] Failed to load credentials for ${toolInput.credentials_app}:`, err.message);
+        const creds = await getCredentialsForTask(customerId, toolInput.credentials_app);
+        if (creds) {
+          appCredentials.push({ app: toolInput.credentials_app, credentials: creds });
         }
+      } else {
+        // Auto-detect relevant apps from the task message
+        appCredentials = await getRelevantCredentials(customerId, taskMessage);
       }
 
       // Also include customer profile info for the task
@@ -377,7 +374,8 @@ async function executeTool(customerId, toolName, toolInput) {
       const custName = custResult.rows[0]?.name || 'the customer';
       taskMessage = `You are completing this task on behalf of ${custName}. ${taskMessage}`;
 
-      console.log(`[OPENCLAW] Sending task for customer ${customerId}: ${taskMessage.substring(0, 200)}`);
+      console.log(`[OPENCLAW] Sending task for customer ${customerId}: ${taskMessage.substring(0, 200)}`,
+        appCredentials.length ? `(with ${appCredentials.length} credential set(s))` : '(no credentials)');
 
       // Check web_tasks usage limit
       try {
@@ -391,13 +389,14 @@ async function executeTool(customerId, toolName, toolInput) {
         console.warn('[OPENCLAW] Usage tracking error:', err.message);
       }
 
-      // Send to OpenClaw bridge
+      // Send to OpenClaw bridge with credentials
       const response = await fetch(`${OPENCLAW_URL}/browse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: taskMessage,
           timeout: 120,
+          credentials: appCredentials,
         }),
       });
 

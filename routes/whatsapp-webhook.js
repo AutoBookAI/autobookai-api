@@ -97,21 +97,35 @@ function needsOpenClawAction(message) {
   return actionPatterns.some(pattern => pattern.test(message));
 }
 
-async function sendToOpenClaw(task, customerPhone) {
+async function sendToOpenClaw(task, customerPhone, customerId) {
   const OPENCLAW_URL = process.env.OPENCLAW_URL;
   if (!OPENCLAW_URL) {
     console.log('[OPENCLAW] No OPENCLAW_URL configured, skipping');
     return null;
   }
   try {
-    console.log('[OPENCLAW] Sending task:', task.substring(0, 200));
+    // Look up relevant credentials for this task
+    let appCredentials = [];
+    if (customerId) {
+      try {
+        const { getRelevantCredentials } = require('../services/connected-apps');
+        appCredentials = await getRelevantCredentials(customerId, task);
+      } catch (err) {
+        console.warn('[OPENCLAW] Failed to look up credentials:', err.message);
+      }
+    }
+
+    console.log('[OPENCLAW] Sending task:', task.substring(0, 200),
+      appCredentials.length ? `(with ${appCredentials.length} credential set(s))` : '(no credentials)');
+
     const response = await fetch(`${OPENCLAW_URL}/browse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message: task,
         name: `WhatsApp task from ${customerPhone}`,
-        timeout: 120
+        timeout: 120,
+        credentials: appCredentials,
       })
     });
     const data = await response.json();
@@ -276,7 +290,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       await sendWhatsAppReply(toNumber, fromNumber,
         "On it! I'm looking into that for you now. This might take a minute...");
 
-      const openclawResult = await sendToOpenClaw(messageContent, fromNumber);
+      const openclawResult = await sendToOpenClaw(messageContent, fromNumber, customer.id);
 
       if (openclawResult && openclawResult.response) {
         const chunks = splitMessage(openclawResult.response, 1500);
