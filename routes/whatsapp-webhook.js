@@ -82,6 +82,47 @@ function normalizePhone(phone) {
 const SIGNUP_URL = 'https://dashboard-production-0a18.up.railway.app/signup';
 const PORTAL_URL = 'https://dashboard-production-0a18.up.railway.app/portal';
 
+// ── OpenClaw integration — detect and route action tasks ──────────────────
+
+function needsOpenClawAction(message) {
+  const actionPatterns = [
+    /(?:book|reserve|make a reservation|schedule|sign up|register|order|buy|purchase)/i,
+    /(?:go to|visit|open|check|look up|search|find|browse)\s+(?:the\s+)?(?:website|site|page|url|link|http)/i,
+    /(?:fill out|fill in|submit|complete)\s+(?:the\s+)?(?:form|application|registration|signup)/i,
+    /(?:look up|search for|find|check)\s+(?:prices?|availability|hours|menu|schedule|listings?|reviews?)/i,
+    /(?:go online|go on the internet|use the internet|browse the web)/i,
+    /(?:opentable|yelp|google maps|airbnb|booking\.com|amazon|ebay|zillow|expedia|kayak)/i,
+    /(?:what are the hours|is .+ open|how much does|what's the price|menu|availability)/i,
+  ];
+  return actionPatterns.some(pattern => pattern.test(message));
+}
+
+async function sendToOpenClaw(task, customerPhone) {
+  const OPENCLAW_URL = process.env.OPENCLAW_URL;
+  if (!OPENCLAW_URL) {
+    console.log('[OPENCLAW] No OPENCLAW_URL configured, skipping');
+    return null;
+  }
+  try {
+    console.log('[OPENCLAW] Sending task:', task.substring(0, 200));
+    const response = await fetch(`${OPENCLAW_URL}/browse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: task,
+        name: `WhatsApp task from ${customerPhone}`,
+        timeout: 120
+      })
+    });
+    const data = await response.json();
+    console.log('[OPENCLAW] Response:', JSON.stringify(data).substring(0, 500));
+    return data;
+  } catch (err) {
+    console.error('[OPENCLAW] Error:', err.message);
+    return null;
+  }
+}
+
 // ── Main webhook handler ──────────────────────────────────────────────────
 router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
   // Respond immediately with empty TwiML — Twilio requires a response
@@ -218,11 +259,37 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       return;
     }
 
-    // ── Step 6: Send to shared Claude assistant ────────────────────────
+    // ── Step 6: Check if this needs OpenClaw (web browsing / action) ──
+    if (needsOpenClawAction(messageContent) && process.env.OPENCLAW_URL) {
+      await sendWhatsAppReply(toNumber, fromNumber,
+        "On it! I'm looking into that for you now. This might take a minute...");
+
+      const openclawResult = await sendToOpenClaw(messageContent, fromNumber);
+
+      if (openclawResult && openclawResult.response) {
+        const chunks = splitMessage(openclawResult.response, 1500);
+        for (const chunk of chunks) {
+          await sendWhatsAppReply(toNumber, fromNumber, chunk);
+        }
+        console.log(`✅ OpenClaw replied to ${fromNumber} (customer ${customer.id})`);
+        await pool.query(
+          `INSERT INTO activity_log (customer_id, event_type, description, metadata)
+           VALUES ($1, 'openclaw_task', $2, $3)`,
+          [customer.id, `OpenClaw task from ${fromNumber}`, JSON.stringify({
+            message_sid: MessageSid, from: fromNumber, task: messageContent.substring(0, 200),
+          })]
+        );
+        return;
+      }
+      // If OpenClaw failed or returned nothing, fall through to Claude
+      console.log('[OPENCLAW] No result, falling through to Claude');
+    }
+
+    // ── Step 7: Send to shared Claude assistant ────────────────────────
     console.log(`🤖 Sending to Claude for customer ${customer.id}`);
     const replyText = await handleMessage(customer.id, messageContent);
 
-    // ── Step 7: Send AI response back via WhatsApp ──────────────────────
+    // ── Step 8: Send AI response back via WhatsApp ──────────────────────
     // WhatsApp has a 1600 char limit per message — split if needed
     const chunks = splitMessage(replyText, 1500);
     for (const chunk of chunks) {
@@ -231,7 +298,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
 
     console.log(`✅ Replied to ${fromNumber} (customer ${customer.id}, ${chunks.length} msg${chunks.length > 1 ? 's' : ''})`);
 
-    // ── Step 8: Log to activity_log ─────────────────────────────────────
+    // ── Step 9: Log to activity_log ─────────────────────────────────────
     await pool.query(
       `INSERT INTO activity_log (customer_id, event_type, description, metadata)
        VALUES ($1, 'whatsapp_message', $2, $3)`,
