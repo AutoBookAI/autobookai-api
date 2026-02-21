@@ -187,10 +187,20 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       );
     }
 
+    // Also try matching by phone_number (for customers who signed up with their phone)
+    if (!custResult.rows.length) {
+      custResult = await pool.query(
+        `SELECT c.id, c.name, c.subscription_status, c.whatsapp_from, c.plan
+         FROM customers c
+         WHERE c.phone_number = $1 OR c.phone_number = $2`,
+        [fromNumber, normalizedLookup]
+      );
+    }
+
     if (!custResult.rows.length) {
       console.warn(`No customer found for ${isSandbox ? 'sender' : 'number'} ${lookupNumber}`);
       await sendWhatsAppReply(toNumber, fromNumber,
-        `Hey! You need a Kova account to use this service. Sign up at ${SIGNUP_URL}`);
+        `Hey! You don't have a Kova account yet. Sign up at ${SIGNUP_URL} to get started!`);
       return;
     }
 
@@ -203,23 +213,15 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       return;
     }
 
-    // ── Step 3: Check daily message limit ──────────────────────────────
-    const PLAN_LIMITS = { pro: 100, assistant: 30 };
-    const UNLIMITED_CUSTOMER_IDS = [1]; // Platform owner — no daily limit
+    // ── Step 3: Check monthly message limit ─────────────────────────────
+    const UNLIMITED_CUSTOMER_IDS = [1]; // Platform owner — no limit
 
     if (!UNLIMITED_CUSTOMER_IDS.includes(customer.id)) {
-      const dailyLimit = PLAN_LIMITS[customer.plan] || 30;
-      const countResult = await pool.query(
-        `SELECT COUNT(*) FROM conversations
-         WHERE customer_id = $1 AND role = 'user'
-           AND created_at >= NOW() - INTERVAL '24 hours'`,
-        [customer.id]
-      );
-      const dailyCount = parseInt(countResult.rows[0].count, 10);
-      if (dailyCount >= dailyLimit) {
-        const upgradeHint = customer.plan !== 'pro' ? ' Upgrade to Kova Pro for 100 messages/day.' : '';
+      const { checkLimit, incrementUsage } = require('../services/usage');
+      const limitCheck = await checkLimit(customer.id, 'whatsapp_messages');
+      if (limitCheck.exceeded) {
         await sendWhatsAppReply(toNumber, fromNumber,
-          `You've reached your daily message limit (${dailyLimit} messages). Your limit resets in 24 hours.${upgradeHint}`);
+          `You've used all 200 messages for this month. Your limit resets on the 1st!`);
         return;
       }
     }
@@ -261,6 +263,16 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
 
     // ── Step 6: Check if this needs OpenClaw (web browsing / action) ──
     if (needsOpenClawAction(messageContent) && process.env.OPENCLAW_URL) {
+      // Check web_tasks limit before proceeding
+      if (!UNLIMITED_CUSTOMER_IDS.includes(customer.id)) {
+        const { checkLimit: checkWebLimit } = require('../services/usage');
+        const webCheck = await checkWebLimit(customer.id, 'web_tasks');
+        if (webCheck.exceeded) {
+          await sendWhatsAppReply(toNumber, fromNumber,
+            `You've used all 20 web tasks for this month. Your limit resets on the 1st!`);
+          return;
+        }
+      }
       await sendWhatsAppReply(toNumber, fromNumber,
         "On it! I'm looking into that for you now. This might take a minute...");
 
@@ -279,6 +291,12 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
             message_sid: MessageSid, from: fromNumber, task: messageContent.substring(0, 200),
           })]
         );
+        // Increment both message and web task usage
+        if (!UNLIMITED_CUSTOMER_IDS.includes(customer.id)) {
+          const { incrementUsage } = require('../services/usage');
+          await incrementUsage(customer.id, 'whatsapp_messages');
+          await incrementUsage(customer.id, 'web_tasks');
+        }
         return;
       }
       // If OpenClaw failed or returned nothing, fall through to Claude
@@ -313,6 +331,12 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
         }),
       ]
     );
+
+    // ── Step 10: Increment usage counter ────────────────────────────────
+    if (!UNLIMITED_CUSTOMER_IDS.includes(customer.id)) {
+      const { incrementUsage } = require('../services/usage');
+      await incrementUsage(customer.id, 'whatsapp_messages');
+    }
 
   } catch (err) {
     console.error('WhatsApp webhook error:', err);

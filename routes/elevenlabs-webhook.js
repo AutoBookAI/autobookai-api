@@ -100,6 +100,11 @@ router.post('/', async (req, res) => {
       ]
     );
 
+    // Track call_minutes usage (estimate ~1 minute per 10 transcript entries, minimum 1)
+    const estimatedMinutes = Math.max(1, Math.round(transcript.length / 10));
+    const { incrementUsage } = require('../services/usage');
+    await incrementUsage(customerId, 'call_minutes', estimatedMinutes);
+
   } catch (err) {
     console.error('[ELEVENLABS-WEBHOOK] Error processing post-call webhook:', err.message);
   }

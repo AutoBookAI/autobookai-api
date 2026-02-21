@@ -7,18 +7,20 @@ router.get('/plans', (req, res) => {
   res.json([
     {
       id: 'assistant',
-      name: 'AI Assistant',
-      price: 49.99,
-      description: 'Your personal AI assistant — book restaurants, flights, handle issues via WhatsApp',
+      name: 'Kova Assistant',
+      price: 25,
+      description: 'Your personal AI assistant — 200 messages, 10 call minutes, 20 web tasks per month',
       stripePriceId: process.env.STRIPE_PRICE_ID,
       features: [
-        'WhatsApp AI assistant 24/7',
-        'Restaurant bookings (OpenTable, Resy, direct call)',
-        'Flight & hotel bookings',
-        'Email & phone on your behalf',
-        'Remembers all your preferences',
-        'Handles travel disruptions',
+        '200 WhatsApp messages per month',
+        '10 call minutes per month',
+        '20 web tasks per month',
+        'AI phone calls on your behalf',
+        'Email sending & drafting',
+        'Web search & research',
         'Calendar management',
+        'Preference memory',
+        'Dedicated WhatsApp number',
       ]
     }
   ]);

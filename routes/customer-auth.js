@@ -99,7 +99,7 @@ router.get('/me', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, name, email, whatsapp_to, subscription_status,
-              openclaw_status, plan, created_at
+              openclaw_status, plan, phone_number, created_at
        FROM customers WHERE id=$1`,
       [req.customerId]
     );
@@ -147,7 +147,7 @@ router.patch('/profile', async (req, res) => {
     dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
     preferred_airlines, seat_preference, cabin_class, hotel_preferences,
     loyalty_numbers, full_name, date_of_birth, passport_number, preferred_contact,
-    timezone, gmail_app_password,
+    timezone, gmail_app_password, phone_number,
   } = req.body;
 
   try {
@@ -156,6 +156,14 @@ router.patch('/profile', async (req, res) => {
       [req.customerId]
     );
     if (!check.rows.length) return res.status(404).json({ error: 'Not found' });
+
+    // Update phone_number on customers table if provided
+    if (phone_number !== undefined) {
+      await pool.query(
+        'UPDATE customers SET phone_number = $1, updated_at = NOW() WHERE id = $2',
+        [phone_number || null, req.customerId]
+      );
+    }
 
     // Encrypt sensitive fields with per-customer key
     // Empty string "" → null to allow clearing via COALESCE
@@ -219,6 +227,23 @@ router.post('/billing/portal', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to open billing portal' });
+  }
+});
+
+// GET /api/customer/usage — current month usage stats
+router.get('/usage', async (req, res) => {
+  try {
+    const { getUsage, LIMITS } = require('../services/usage');
+    const usage = await getUsage(req.customerId);
+    res.json({
+      month: usage.month,
+      whatsapp: { used: usage.whatsapp_messages, limit: LIMITS.whatsapp_messages },
+      calls: { used: parseFloat(usage.call_minutes), limit: LIMITS.call_minutes },
+      webTasks: { used: usage.web_tasks, limit: LIMITS.web_tasks }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch usage' });
   }
 });
 
