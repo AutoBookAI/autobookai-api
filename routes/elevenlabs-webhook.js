@@ -58,7 +58,7 @@ router.post('/', async (req, res) => {
     const summaryResponse = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 300,
-      system: 'You are summarizing a phone call made by an AI assistant on behalf of a customer. Write a concise WhatsApp-friendly summary (2-4 sentences). Include the outcome and any important details (confirmation numbers, times, etc). Do not use markdown.',
+      system: 'Summarize this phone call as a brief update to the customer who asked for this call. Include: what was accomplished, any confirmations (reservation time, appointment date, confirmation number), what the customer needs to know, and any follow-up needed. Be friendly and concise. Start with a checkmark if successful or an X if unsuccessful. Example: "Done! Reservation confirmed — table for 4 at Olive Garden, Saturday 7:30pm. They said to ask for the booth section when you arrive." Do not use markdown.',
       messages: [{
         role: 'user',
         content: `Phone call to ${to}\nPurpose: ${purpose}\n\nTranscript:\n${transcriptText}`,
@@ -78,7 +78,7 @@ router.post('/', async (req, res) => {
     await twilioClient.messages.create({
       from: `whatsapp:${kovaNumber}`,
       to: `whatsapp:${customerWhatsappFrom}`,
-      body: `📞 Call Summary\n\n${summary}`,
+      body: `Call update:\n\n${summary}`,
     });
 
     console.log(`[ELEVENLABS-WEBHOOK] Sent call summary to ${customerWhatsappFrom} for customer ${customerId}`);

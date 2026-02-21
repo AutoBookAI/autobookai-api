@@ -44,13 +44,15 @@ setInterval(() => {
  * Customer context is passed as dynamic variables to the ElevenLabs agent.
  *
  * @param {object} opts
- * @param {string} opts.to        - Phone number to call (E.164 format)
- * @param {string} opts.message   - Initial greeting / context for the call
- * @param {string} opts.purpose   - Goal of the call (e.g. "book a table for 4 at 7pm")
- * @param {number} opts.customerId - Customer ID for profile loading
+ * @param {string} opts.to           - Phone number to call (E.164 format)
+ * @param {string} opts.message      - Initial greeting / context for the call
+ * @param {string} opts.purpose      - Goal of the call (e.g. "book a table for 4 at 7pm")
+ * @param {string} opts.task         - Structured task description for the ElevenLabs agent
+ * @param {string} opts.preferences  - Customer preferences for the call (times, party size, etc.)
+ * @param {number} opts.customerId   - Customer ID for profile loading
  * @returns {{ conversationId, callSid, status, mode }}
  */
-async function makeCall({ to, message, customerId, purpose }) {
+async function makeCall({ to, message, customerId, purpose, task, preferences }) {
   if (!to || !message) throw new Error('Missing required fields: to, message');
 
   // Validate phone number format (E.164)
@@ -98,6 +100,9 @@ async function makeCall({ to, message, customerId, purpose }) {
           customer_name: customerName,
           purpose: purpose || message,
           initial_message: message,
+          task: task || purpose || message,
+          preferences: preferences || 'No specific preferences',
+          customer_whatsapp: customerWhatsappFrom || '',
         },
       },
     }),

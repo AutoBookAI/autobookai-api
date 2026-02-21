@@ -1,12 +1,13 @@
 /**
  * ╔══════════════════════════════════════════════════════════════════════╗
- * ║  WARNING: INBOUND VOICE CALLS ARE HANDLED BY ELEVENLABS            ║
+ * ║  INBOUND CALLS → /webhook/voice/reject (polite hang-up)           ║
+ * ║  OUTBOUND CALLS → ElevenLabs Conversational AI (unchanged)        ║
  * ║                                                                     ║
- * ║  The Twilio voice webhook for +19785588477 points to:              ║
- * ║  https://api.us.elevenlabs.io/twilio/inbound_call                  ║
+ * ║  Twilio voice webhook for +19785588477 points to:                 ║
+ * ║  .../webhook/voice/reject                                          ║
  * ║                                                                     ║
- * ║  DO NOT change the Twilio phone number's Voice URL.                ║
- * ║  This file is ONLY used as a backup / for outbound call fallback.  ║
+ * ║  Customers cannot call Kova directly. Outbound calls are           ║
+ * ║  initiated by the assistant via ElevenLabs API.                    ║
  * ╚══════════════════════════════════════════════════════════════════════╝
  *
  * Voice Webhook — Twilio Gather + ElevenLabs Play with Claude Haiku.
@@ -318,5 +319,21 @@ function handleFallback(req, res) {
 
 router.get('/fallback', handleFallback);
 router.post('/fallback', handleFallback);
+
+// ── GET and POST /reject — Polite hang-up for inbound callers ──────────────
+// Inbound calls are not supported. Kova only makes outbound calls on behalf of
+// customers. This endpoint tells callers to use WhatsApp instead.
+
+function handleReject(req, res) {
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">Thanks for calling! Kova works through WhatsApp. Send a message to this number on WhatsApp and I can help you there. Goodbye!</Say>
+  <Hangup/>
+</Response>`;
+  res.type('text/xml').send(twiml);
+}
+
+router.get('/reject', handleReject);
+router.post('/reject', handleReject);
 
 module.exports = router;
