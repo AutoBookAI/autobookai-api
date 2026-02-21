@@ -42,7 +42,6 @@ const TOOL_DEFINITIONS = [
         to:      { type: 'string', description: 'Phone number in E.164 format (e.g. +14155551234)' },
         message: { type: 'string', description: 'Initial greeting to speak when the call connects' },
         purpose: { type: 'string', description: 'The goal of this call — what should be accomplished (e.g. "book a table for 4 at 7pm tonight", "cancel the appointment on Friday")' },
-        voice:   { type: 'string', description: 'TTS voice (default: Polly.Joanna)' },
       },
       required: ['to', 'message', 'purpose'],
     },
@@ -207,7 +206,6 @@ async function executeTool(customerId, toolName, toolInput) {
         to: toolInput.to,
         message: toolInput.message,
         purpose: toolInput.purpose,
-        voice: toolInput.voice,
         customerId,
       });
       logActivity(customerId, 'phone_call', `Conversational call to ${toolInput.to}: ${toolInput.purpose || toolInput.message}`);

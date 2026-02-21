@@ -169,11 +169,7 @@ router.post('/:customerId/call', callLimit, async (req, res) => {
   }
   try {
     const { makeCall } = require('../services/twilio-voice');
-    const custResult = await pool.query(
-      'SELECT whatsapp_to FROM customers WHERE id=$1', [req.customerId]
-    );
-    const from = custResult.rows[0]?.whatsapp_to;
-    const result = await makeCall({ to, message, from, voice: req.body.voice });
+    const result = await makeCall({ to, message, customerId: req.customerId, purpose: req.body.purpose });
 
     // Track this call SID for this customer
     if (!customerCallSids.has(req.customerId)) customerCallSids.set(req.customerId, new Set());

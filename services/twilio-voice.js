@@ -1,55 +1,26 @@
 /**
- * Twilio Voice — conversational AI phone calls.
+ * Voice calls — ElevenLabs Conversational AI outbound calls via Twilio.
  *
- * When the AI calls someone, it has a real back-and-forth conversation using:
- *  - Twilio <Gather input="speech"> for speech-to-text
- *  - Claude for generating contextual responses
- *  - Twilio <Say> for text-to-speech
+ * Outbound calls are initiated through the ElevenLabs Conversational AI API,
+ * which handles the full voice conversation (STT, LLM, TTS) autonomously.
+ * Customer context is passed as dynamic variables to the ElevenLabs agent.
  *
- * Call sessions are stored in-memory (Map) keyed by UUID.
- * The voice-webhook route handles the Twilio callback loop.
+ * Post-call, the ElevenLabs webhook sends a summary which we route back
+ * to the customer via WhatsApp using the pendingCalls map.
  *
- * Requires: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, MASTER_API_URL
+ * Requires: ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID, ELEVENLABS_PHONE_NUMBER_ID
  */
-
-const crypto = require('crypto');
-
-let twilioClient = null;
-
-function getClient() {
-  if (twilioClient) return twilioClient;
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const token = process.env.TWILIO_AUTH_TOKEN;
-  if (!sid || !token) throw new Error('Twilio not configured (missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN)');
-  twilioClient = require('twilio')(sid, token);
-  return twilioClient;
-}
-
-// Allowlisted Twilio TTS voices — prevents TwiML attribute injection
-const ALLOWED_VOICES = new Set([
-  'Polly.Joanna', 'Polly.Matthew', 'Polly.Amy', 'Polly.Brian',
-  'Polly.Kendra', 'Polly.Kimberly', 'Polly.Salli', 'Polly.Joey',
-  'Polly.Ivy', 'Polly.Justin', 'Polly.Ruth', 'Polly.Stephen',
-  'Google.en-US-Standard-A', 'Google.en-US-Standard-B',
-  'Google.en-US-Standard-C', 'Google.en-US-Standard-D',
-  'Google.en-US-Neural2-F', 'Google.en-US-Neural2-D',
-  'Google.en-US-Neural2-A', 'Google.en-US-Neural2-C',
-  'Polly.Joanna-Neural', 'Polly.Matthew-Neural',
-  // Amazon Polly Generative — most human-sounding, no extra API key needed
-  'Polly.Ruth-Generative', 'Polly.Matthew-Generative',
-]);
-
-// Map customer's Kova voice preference to Amazon Polly Generative voices
-const VOICE_FOR_PREFERENCE = {
-  'Kova (Female)': 'Polly.Ruth-Generative',
-  'Kova (Male)':   'Polly.Matthew-Generative',
-};
-const DEFAULT_VOICE = 'Polly.Ruth-Generative';
 
 // ── Active call sessions ────────────────────────────────────────────────────
 // Keyed by callId (UUID). Each session holds conversation state for the voice webhook.
 
 const activeCallSessions = new Map();
+
+// ── Pending calls ───────────────────────────────────────────────────────────
+// Keyed by ElevenLabs conversation_id. Used by the post-call webhook to look up
+// which customer the call belonged to so we can send a WhatsApp summary.
+
+const pendingCalls = new Map();
 
 // Clean up stale sessions every 30 minutes (calls should never last that long)
 setInterval(() => {
@@ -59,24 +30,27 @@ setInterval(() => {
       activeCallSessions.delete(id);
     }
   }
+  for (const [id, entry] of pendingCalls) {
+    if (now - entry.createdAt > 30 * 60 * 1000) {
+      pendingCalls.delete(id);
+    }
+  }
 }, 30 * 60 * 1000);
 
 /**
- * Make an outbound conversational call.
+ * Make an outbound conversational call via ElevenLabs Conversational AI.
  *
- * The call connects to our voice webhook which handles the back-and-forth
- * conversation using Twilio Gather + Claude.
+ * ElevenLabs handles the full voice conversation autonomously (STT, LLM, TTS).
+ * Customer context is passed as dynamic variables to the ElevenLabs agent.
  *
  * @param {object} opts
  * @param {string} opts.to        - Phone number to call (E.164 format)
- * @param {string} opts.message   - Initial greeting to speak when the call connects
+ * @param {string} opts.message   - Initial greeting / context for the call
  * @param {string} opts.purpose   - Goal of the call (e.g. "book a table for 4 at 7pm")
  * @param {number} opts.customerId - Customer ID for profile loading
- * @param {string} [opts.from]    - Caller ID override
- * @param {string} [opts.voice]   - TTS voice (default: 'Polly.Joanna')
- * @returns {{ callSid, status, callId, mode }}
+ * @returns {{ conversationId, callSid, status, mode }}
  */
-async function makeCall({ to, message, from, voice, customerId, purpose }) {
+async function makeCall({ to, message, customerId, purpose }) {
   if (!to || !message) throw new Error('Missing required fields: to, message');
 
   // Validate phone number format (E.164)
@@ -84,22 +58,17 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
     throw new Error('Invalid phone number format. Use E.164 format (e.g. +14155551234)');
   }
 
-  const client = getClient();
-  const callerNumber = from || process.env.TWILIO_PHONE_NUMBER;
-  if (!callerNumber) throw new Error('No caller number. Set TWILIO_PHONE_NUMBER or pass from.');
+  // Validate ElevenLabs configuration
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const agentId = process.env.ELEVENLABS_AGENT_ID;
+  const phoneNumberId = process.env.ELEVENLABS_PHONE_NUMBER_ID;
+  if (!apiKey || !agentId || !phoneNumberId) {
+    throw new Error('ElevenLabs not configured (missing ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID, or ELEVENLABS_PHONE_NUMBER_ID)');
+  }
 
-  const masterApiUrl = process.env.MASTER_API_URL;
-  if (!masterApiUrl) throw new Error('MASTER_API_URL not set — needed for voice webhooks');
-
-  // Generate unique call ID for session tracking
-  const callId = crypto.randomUUID();
-
-  // Load customer info for the call session
+  // Load customer info for dynamic variables
   let customerName = 'a client';
   let customerWhatsappFrom = null;
-  let profileSummary = '';
-  let assistantName = null;
-  let customVoiceId = null;
 
   if (customerId) {
     const { pool } = require('../db');
@@ -111,79 +80,76 @@ async function makeCall({ to, message, from, voice, customerId, purpose }) {
       customerName = custResult.rows[0].name;
       customerWhatsappFrom = custResult.rows[0].whatsapp_from;
     }
-    const profileResult = await pool.query(
-      `SELECT dietary_restrictions, cuisine_preferences, preferred_restaurants,
-              dining_budget, preferred_airlines, seat_preference, cabin_class,
-              hotel_preferences, full_name, assistant_name, voice_clone_id
-       FROM customer_profiles WHERE customer_id=$1`,
-      [customerId]
-    );
-    if (profileResult.rows.length) {
-      const p = profileResult.rows[0];
-      assistantName = p.assistant_name || null;
-      customVoiceId = p.voice_clone_id || null;
-      const parts = [];
-      if (p.full_name) parts.push(`Full name: ${p.full_name}`);
-      if (p.dietary_restrictions) parts.push(`Dietary restrictions: ${p.dietary_restrictions}`);
-      if (p.cuisine_preferences) parts.push(`Cuisine preferences: ${p.cuisine_preferences}`);
-      if (p.preferred_restaurants) parts.push(`Preferred restaurants: ${p.preferred_restaurants}`);
-      if (p.dining_budget) parts.push(`Dining budget: ${p.dining_budget}`);
-      if (p.preferred_airlines) parts.push(`Preferred airlines: ${p.preferred_airlines}`);
-      if (p.seat_preference) parts.push(`Seat preference: ${p.seat_preference}`);
-      if (p.cabin_class) parts.push(`Cabin class: ${p.cabin_class}`);
-      if (p.hotel_preferences) parts.push(`Hotel preferences: ${p.hotel_preferences}`);
-      profileSummary = parts.join('\n');
-    }
   }
 
-  // Select voice: explicit override → customer preference → default neural voice
-  let safeVoice;
-  if (voice && ALLOWED_VOICES.has(voice)) {
-    safeVoice = voice;
-  } else if (assistantName && VOICE_FOR_PREFERENCE[assistantName]) {
-    safeVoice = VOICE_FOR_PREFERENCE[assistantName];
-  } else {
-    safeVoice = DEFAULT_VOICE;
+  // Call ElevenLabs Conversational AI outbound call API
+  const response = await fetch('https://api.elevenlabs.io/v1/convai/twilio/outbound-call', {
+    method: 'POST',
+    headers: {
+      'xi-api-key': apiKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      agent_id: agentId,
+      agent_phone_number_id: phoneNumberId,
+      to_number: to,
+      conversation_initiation_client_data: {
+        dynamic_variables: {
+          customer_name: customerName,
+          purpose: purpose || message,
+          initial_message: message,
+        },
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`ElevenLabs outbound call failed (${response.status}): ${errorBody}`);
   }
 
-  // Determine voice gender for ElevenLabs
-  const voiceGender = (assistantName === 'Kova (Male)') ? 'male' : 'female';
+  const result = await response.json();
+  const conversationId = result.conversation_id || null;
+  const callSid = result.callSid || null;
 
-  // Store session for the voice webhook
-  activeCallSessions.set(callId, {
-    customerId,
-    customerName,
-    customerWhatsappFrom,
-    to,
-    purpose: purpose || message,
-    initialMessage: message,
-    voice: safeVoice,
-    voiceGender,
-    customVoiceId,
-    history: [],
-    profileSummary,
-    createdAt: Date.now(),
-  });
+  // Store in activeCallSessions (keyed by conversationId) for webhook lookups
+  if (conversationId) {
+    activeCallSessions.set(conversationId, {
+      customerId,
+      customerName,
+      customerWhatsappFrom,
+      to,
+      purpose: purpose || message,
+      initialMessage: message,
+      createdAt: Date.now(),
+    });
 
-  // Create the call with webhook URL (not inline TwiML)
-  const call = await client.calls.create({
-    to,
-    from: callerNumber,
-    url: `${masterApiUrl}/webhook/voice?callId=${encodeURIComponent(callId)}`,
-    statusCallback: `${masterApiUrl}/webhook/voice/status?callId=${encodeURIComponent(callId)}`,
-    statusCallbackEvent: ['completed', 'failed', 'busy', 'no-answer'],
-  });
+    // Store in pendingCalls for post-call webhook to send WhatsApp summaries
+    pendingCalls.set(conversationId, {
+      customerId,
+      customerName,
+      customerWhatsappFrom,
+      purpose: purpose || message,
+      to,
+      createdAt: Date.now(),
+    });
+  }
 
-  console.log(`📞 Conversational call initiated to ${to}: ${call.sid} (callId: ${callId})`);
-  return { callSid: call.sid, status: call.status, callId, mode: 'conversational' };
+  console.log(`📞 ElevenLabs outbound call initiated to ${to} (conversationId: ${conversationId}, callSid: ${callSid})`);
+  return { conversationId, callSid, status: 'initiated', mode: 'elevenlabs' };
 }
 
 /**
- * Get the status of an ongoing/completed call.
+ * Get the status of an ongoing/completed call via Twilio.
  */
 async function getCallStatus(callSid) {
-  const client = getClient();
-  const call = await client.calls(callSid).fetch();
+  let twilioClient = null;
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  if (!sid || !token) throw new Error('Twilio not configured (missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN)');
+  twilioClient = require('twilio')(sid, token);
+
+  const call = await twilioClient.calls(callSid).fetch();
   return {
     callSid: call.sid,
     status: call.status,
@@ -204,4 +170,4 @@ function escapeXml(str) {
     .replace(/'/g, '&apos;');
 }
 
-module.exports = { makeCall, getCallStatus, activeCallSessions, escapeXml };
+module.exports = { makeCall, getCallStatus, activeCallSessions, pendingCalls, escapeXml };

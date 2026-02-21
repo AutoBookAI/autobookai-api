@@ -1,4 +1,14 @@
 /**
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║  WARNING: INBOUND VOICE CALLS ARE HANDLED BY ELEVENLABS            ║
+ * ║                                                                     ║
+ * ║  The Twilio voice webhook for +19785588477 points to:              ║
+ * ║  https://api.us.elevenlabs.io/twilio/inbound_call                  ║
+ * ║                                                                     ║
+ * ║  DO NOT change the Twilio phone number's Voice URL.                ║
+ * ║  This file is ONLY used as a backup / for outbound call fallback.  ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
  * Voice Webhook — Twilio Gather + ElevenLabs Play with Claude Haiku.
  *
  * Optimized for low latency:

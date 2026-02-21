@@ -69,6 +69,7 @@ app.use('/api/billing',   require('./routes/billing'));
 app.use('/api/numbers',   require('./routes/numbers'));
 app.use('/api/tools',     require('./routes/tools'));
 app.use('/api/customer',  require('./routes/customer-auth'));
+app.use('/webhook/elevenlabs', require('./routes/elevenlabs-webhook'));
 
 // ── Health ─────────────────────────────────────────────────────────────────────
 app.get('/health', async (_, res) => {
