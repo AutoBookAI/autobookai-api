@@ -73,7 +73,7 @@ router.post('/', async (req, res) => {
       process.env.TWILIO_AUTH_TOKEN
     );
 
-    const kovaNumber = process.env.TWILIO_PHONE_NUMBER || process.env.KOVA_WHATSAPP_NUMBER;
+    const kovaNumber = process.env.TWILIO_WHATSAPP_NUMBER || process.env.KOVA_WHATSAPP_NUMBER || process.env.TWILIO_PHONE_NUMBER;
 
     await twilioClient.messages.create({
       from: `whatsapp:${kovaNumber}`,

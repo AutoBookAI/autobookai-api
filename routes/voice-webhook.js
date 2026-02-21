@@ -375,7 +375,7 @@ router.post('/smart-inbound', async (req, res) => {
     if (latestCall.customer_whatsapp) {
       try {
         const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-        const kovaNumber = process.env.TWILIO_PHONE_NUMBER || process.env.KOVA_WHATSAPP_NUMBER;
+        const kovaNumber = process.env.TWILIO_WHATSAPP_NUMBER || process.env.KOVA_WHATSAPP_NUMBER || process.env.TWILIO_PHONE_NUMBER;
         if (kovaNumber) {
           twilioClient.messages.create({
             from: `whatsapp:${kovaNumber}`,
