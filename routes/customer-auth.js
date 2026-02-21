@@ -54,6 +54,98 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// ── Forgot Password ──────────────────────────────────────────────────────────
+
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+
+  try {
+    const result = await pool.query(
+      'SELECT id, name FROM customers WHERE email=$1 AND password_hash IS NOT NULL',
+      [email]
+    );
+
+    // Always return success to prevent email enumeration
+    if (!result.rows.length) {
+      return res.json({ success: true });
+    }
+
+    const customer = result.rows[0];
+    const crypto = require('crypto');
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    await pool.query(
+      'UPDATE customers SET reset_token=$1, reset_token_expires=$2 WHERE id=$3',
+      [resetToken, expires, customer.id]
+    );
+
+    const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetUrl = `${FRONTEND_URL}/portal/reset-password?token=${resetToken}`;
+
+    try {
+      const { sendPlatformEmail } = require('../services/email');
+      await sendPlatformEmail({
+        to: email,
+        subject: 'Reset your Kova password',
+        body: `Hi ${customer.name},\n\nYou requested a password reset. Click the link below to set a new password:\n\n${resetUrl}\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.\n\n— Kova`,
+        html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px;">
+          <h2 style="color:#1a1a2e;">Reset Your Password</h2>
+          <p>Hi ${customer.name},</p>
+          <p>You requested a password reset. Click the button below to set a new password:</p>
+          <a href="${resetUrl}" style="display:inline-block;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;margin:20px 0;">Reset Password</a>
+          <p style="color:#888;font-size:13px;">This link expires in 1 hour. If you didn't request this, you can safely ignore this email.</p>
+        </div>`,
+      });
+    } catch (emailErr) {
+      console.error('Failed to send reset email:', emailErr.message);
+      console.log(`[PASSWORD RESET] Token for ${email}: ${resetUrl}`);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+// ── Reset Password ───────────────────────────────────────────────────────────
+
+router.post('/reset-password', async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password) {
+    return res.status(400).json({ error: 'Token and new password are required' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+
+  try {
+    const result = await pool.query(
+      'SELECT id FROM customers WHERE reset_token=$1 AND reset_token_expires > NOW()',
+      [token]
+    );
+
+    if (!result.rows.length) {
+      return res.status(400).json({ error: 'Invalid or expired reset link. Please request a new one.' });
+    }
+
+    const customerId = result.rows[0].id;
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      'UPDATE customers SET password_hash=$1, reset_token=NULL, reset_token_expires=NULL, updated_at=NOW() WHERE id=$2',
+      [passwordHash, customerId]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
 // ── Google Calendar OAuth callback (unauthenticated — Google redirects here) ──
 
 router.get('/calendar/callback', async (req, res) => {

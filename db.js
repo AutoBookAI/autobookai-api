@@ -125,6 +125,18 @@ async function initDB() {
         UNIQUE(customer_id, app_name)
       );
 
+      -- ── Usage tracking (monthly limits per customer) ────────────────────
+      CREATE TABLE IF NOT EXISTS usage_tracking (
+        id                 SERIAL PRIMARY KEY,
+        customer_id        INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+        month              VARCHAR(7) NOT NULL,       -- e.g. '2026-02'
+        whatsapp_messages  INTEGER DEFAULT 0,
+        call_minutes       NUMERIC(10,2) DEFAULT 0,
+        web_tasks          INTEGER DEFAULT 0,
+        updated_at         TIMESTAMP DEFAULT NOW(),
+        UNIQUE(customer_id, month)
+      );
+
       -- ── Stripe webhook idempotency ──────────────────────────────────────
       CREATE TABLE IF NOT EXISTS processed_stripe_events (
         event_id     VARCHAR(255) PRIMARY KEY,
@@ -146,6 +158,15 @@ async function initDB() {
 
       -- Encrypted fields need TEXT, not VARCHAR(50) — ciphertext is ~90+ chars
       ALTER TABLE customer_profiles ALTER COLUMN date_of_birth TYPE TEXT;
+
+      -- Connected apps: additional columns for category, status, and last-used tracking
+      ALTER TABLE connected_apps ADD COLUMN IF NOT EXISTS app_category VARCHAR(50);
+      ALTER TABLE connected_apps ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'connected';
+      ALTER TABLE connected_apps ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP;
+
+      -- Password reset tokens
+      ALTER TABLE customers ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255);
+      ALTER TABLE customers ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP;
     `);
 
     // ── Indexes (safe to re-run) ────────────────────────────────────────
@@ -154,6 +175,7 @@ async function initDB() {
       CREATE INDEX IF NOT EXISTS idx_customers_stripe_sub_id ON customers(stripe_subscription_id);
       CREATE INDEX IF NOT EXISTS idx_activity_log_customer_id ON activity_log(customer_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_customer_id ON conversations(customer_id);
+      CREATE INDEX IF NOT EXISTS idx_usage_tracking_customer_month ON usage_tracking(customer_id, month);
     `);
 
     console.log('✅ Database ready');

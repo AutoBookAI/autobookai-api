@@ -68,20 +68,50 @@ async function makeCall({ to, message, customerId, purpose, task, preferences })
     throw new Error('ElevenLabs not configured (missing ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID, or ELEVENLABS_PHONE_NUMBER_ID)');
   }
 
-  // Load customer info for dynamic variables
+  // Load customer info and voice clone for dynamic variables
   let customerName = 'a client';
   let customerWhatsappFrom = null;
+  let voiceCloneId = null;
 
   if (customerId) {
     const { pool } = require('../db');
     const custResult = await pool.query(
-      'SELECT name, whatsapp_from FROM customers WHERE id=$1',
+      `SELECT c.name, c.whatsapp_from, cp.voice_clone_id
+       FROM customers c
+       LEFT JOIN customer_profiles cp ON cp.customer_id = c.id
+       WHERE c.id=$1`,
       [customerId]
     );
     if (custResult.rows.length) {
       customerName = custResult.rows[0].name;
       customerWhatsappFrom = custResult.rows[0].whatsapp_from;
+      voiceCloneId = custResult.rows[0].voice_clone_id || null;
     }
+  }
+
+  // Build ElevenLabs request body
+  const requestBody = {
+    agent_id: agentId,
+    agent_phone_number_id: phoneNumberId,
+    to_number: to,
+    conversation_initiation_client_data: {
+      dynamic_variables: {
+        customer_name: customerName,
+        purpose: purpose || message,
+        initial_message: message,
+        task: task || purpose || message,
+        preferences: preferences || 'No specific preferences',
+        customer_whatsapp: customerWhatsappFrom || '',
+      },
+    },
+  };
+
+  // Override agent voice with customer's cloned voice if available
+  if (voiceCloneId) {
+    requestBody.conversation_initiation_client_data.overrides = {
+      agent: { tts: { voice_id: voiceCloneId } },
+    };
+    console.log(`🎙️ Using cloned voice ${voiceCloneId} for customer ${customerId}`);
   }
 
   // Call ElevenLabs Conversational AI outbound call API
@@ -91,21 +121,7 @@ async function makeCall({ to, message, customerId, purpose, task, preferences })
       'xi-api-key': apiKey,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      agent_id: agentId,
-      agent_phone_number_id: phoneNumberId,
-      to_number: to,
-      conversation_initiation_client_data: {
-        dynamic_variables: {
-          customer_name: customerName,
-          purpose: purpose || message,
-          initial_message: message,
-          task: task || purpose || message,
-          preferences: preferences || 'No specific preferences',
-          customer_whatsapp: customerWhatsappFrom || '',
-        },
-      },
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {

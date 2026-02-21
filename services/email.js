@@ -84,4 +84,31 @@ async function sendEmail(customerId, { to, subject, body, cc, bcc }) {
   throw new Error('Email not configured. Set RESEND_API_KEY env var, or add a Gmail app password for this customer.');
 }
 
-module.exports = { sendEmail };
+/**
+ * Send a platform-level email (not on behalf of a customer).
+ * Uses Resend only. For password resets, notifications, etc.
+ */
+async function sendPlatformEmail({ to, subject, body, html }) {
+  const resend = getResend();
+  if (!resend) {
+    throw new Error('Email not configured. Set RESEND_API_KEY env var.');
+  }
+
+  const fromAddress = process.env.RESEND_FROM || 'Kova <noreply@getkova.com>';
+  const result = await resend.emails.send({
+    from: fromAddress,
+    to: Array.isArray(to) ? to : [to],
+    subject,
+    text: body,
+    html: html || undefined,
+  });
+
+  if (result.error) {
+    throw new Error(`Resend API error: ${result.error.message}`);
+  }
+
+  console.log(`✉️ Platform email sent to ${to}: ${result.data.id}`);
+  return { messageId: result.data.id };
+}
+
+module.exports = { sendEmail, sendPlatformEmail };
