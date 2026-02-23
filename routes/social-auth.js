@@ -70,6 +70,14 @@ const PROVIDERS = {
   },
 };
 
+// GET /api/auth/social/available — list configured providers
+router.get('/available', (req, res) => {
+  const available = Object.entries(PROVIDERS)
+    .filter(([, p]) => !!process.env[p.clientIdEnv])
+    .map(([name]) => name);
+  res.json({ providers: available });
+});
+
 // GET /api/auth/:provider — redirect to OAuth consent screen
 router.get('/:provider', (req, res) => {
   const provider = PROVIDERS[req.params.provider];

@@ -40,7 +40,7 @@ app.use(
 app.use('/voice-audio', express.static(path.join(os.tmpdir(), 'voice-audio')));
 
 // ── Standard middleware ────────────────────────────────────────────────────────
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '1mb' }));
 app.use(cors({
   origin: function(origin, callback) {
     if (!origin
