@@ -227,7 +227,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       return;
     }
 
-    // ── Step 3: Check monthly message limit ─────────────────────────────
+    // ── Step 3: Check daily message limit ──────────────────────────────
     const UNLIMITED_CUSTOMER_IDS = [1]; // Platform owner — no limit
 
     if (!UNLIMITED_CUSTOMER_IDS.includes(customer.id)) {
@@ -235,7 +235,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
       const limitCheck = await checkLimit(customer.id, 'whatsapp_messages');
       if (limitCheck.exceeded) {
         await sendWhatsAppReply(toNumber, fromNumber,
-          `You've used all 200 messages for this month. Your limit resets on the 1st!`);
+          `You've reached your daily message limit (30/day). Try again tomorrow!`);
         return;
       }
     }
@@ -283,7 +283,7 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
         const webCheck = await checkWebLimit(customer.id, 'web_tasks');
         if (webCheck.exceeded) {
           await sendWhatsAppReply(toNumber, fromNumber,
-            `You've used all 20 web tasks for this month. Your limit resets on the 1st!`);
+            `You've reached your daily web task limit (2/day). Try again tomorrow!`);
           return;
         }
       }

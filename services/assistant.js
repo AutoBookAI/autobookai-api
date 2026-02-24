@@ -382,7 +382,7 @@ async function executeTool(customerId, toolName, toolInput) {
         const { checkLimit, incrementUsage } = require('./usage');
         const webCheck = await checkLimit(customerId, 'web_tasks');
         if (webCheck.exceeded) {
-          return { error: 'Monthly web task limit reached (20/20). Resets on the 1st.' };
+          return { error: 'Daily web task limit reached (2/day). Try again tomorrow!' };
         }
         await incrementUsage(customerId, 'web_tasks');
       } catch (err) {

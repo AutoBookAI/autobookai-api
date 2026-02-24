@@ -8,13 +8,13 @@ router.get('/plans', (req, res) => {
     {
       id: 'assistant',
       name: 'Kova Assistant',
-      price: 25,
-      description: 'Your personal AI assistant — 200 messages, 10 call minutes, 20 web tasks per month',
+      price: 40,
+      description: 'Your personal AI assistant — 30 messages/day, 60 call minutes/month, 2 web tasks/day',
       stripePriceId: process.env.STRIPE_PRICE_ID,
       features: [
-        '200 WhatsApp messages per month',
-        '10 call minutes per month',
-        '20 web tasks per month',
+        '30 WhatsApp messages per day',
+        '60 call minutes per month',
+        '2 web tasks per day',
         'AI phone calls on your behalf',
         'Email sending & drafting',
         'Web search & research',
