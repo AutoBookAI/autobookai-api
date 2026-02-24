@@ -8,11 +8,10 @@ function getToday() {
   return new Date().toISOString().split('T')[0]; // '2026-02-23'
 }
 
-// Daily limits for messages and web tasks, monthly for call minutes
+// Daily limits for messages and call minutes. Web tasks are unlimited.
 const LIMITS = {
   whatsapp_messages: 30,  // per day
-  call_minutes: 60,       // per month
-  web_tasks: 2            // per day
+  call_minutes: 60,       // per day
 };
 
 /**
@@ -65,9 +64,19 @@ async function getDailyUsage(customerId, type) {
     return parseInt(result.rows[0].count) || 0;
   }
 
-  // call_minutes stays monthly
-  const usage = await getUsage(customerId);
-  return parseFloat(usage.call_minutes) || 0;
+  // call_minutes — now daily, count from activity_log
+  if (type === 'call_minutes') {
+    const result = await pool.query(
+      `SELECT COALESCE(SUM((metadata::json->>'duration_minutes')::numeric), 0) as total
+       FROM activity_log
+       WHERE customer_id = $1 AND event_type = 'phone_call'
+       AND DATE(created_at) = $2`,
+      [customerId, today]
+    );
+    return parseFloat(result.rows[0].total) || 0;
+  }
+
+  return 0;
 }
 
 async function incrementUsage(customerId, type, amount = 1) {
@@ -82,26 +91,18 @@ async function incrementUsage(customerId, type, amount = 1) {
 
 /**
  * Check if a customer has exceeded their limit.
- * Messages and web tasks use DAILY limits.
- * Call minutes use MONTHLY limits.
+ * Messages and call minutes use DAILY limits.
+ * Web tasks are unlimited (no limit check).
  */
 async function checkLimit(customerId, type) {
-  const limit = LIMITS[type];
-
-  if (type === 'call_minutes') {
-    // Monthly limit
-    const usage = await getUsage(customerId);
-    const current = parseFloat(usage.call_minutes) || 0;
-    return {
-      current,
-      limit,
-      remaining: Math.max(0, limit - current),
-      exceeded: current >= limit,
-      period: 'monthly'
-    };
+  // Web tasks are unlimited — never exceeded
+  if (type === 'web_tasks') {
+    return { current: 0, limit: Infinity, remaining: Infinity, exceeded: false, period: 'unlimited' };
   }
 
-  // Daily limit for messages and web tasks
+  const limit = LIMITS[type];
+
+  // All limits are now daily
   const current = await getDailyUsage(customerId, type);
   return {
     current,

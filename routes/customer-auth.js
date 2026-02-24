@@ -322,18 +322,17 @@ router.post('/billing/portal', async (req, res) => {
   }
 });
 
-// GET /api/customer/usage — usage stats (daily for messages/web tasks, monthly for calls)
+// GET /api/customer/usage — usage stats (daily for messages/calls, unlimited for web tasks)
 router.get('/usage', async (req, res) => {
   try {
-    const { getUsage, getDailyUsage, LIMITS } = require('../services/usage');
-    const usage = await getUsage(req.customerId);
+    const { getDailyUsage, LIMITS } = require('../services/usage');
     const dailyMessages = await getDailyUsage(req.customerId, 'whatsapp_messages');
+    const dailyCallMinutes = await getDailyUsage(req.customerId, 'call_minutes');
     const dailyWebTasks = await getDailyUsage(req.customerId, 'web_tasks');
     res.json({
-      month: usage.month,
       whatsapp: { used: dailyMessages, limit: LIMITS.whatsapp_messages, period: 'daily' },
-      calls: { used: parseFloat(usage.call_minutes) || 0, limit: LIMITS.call_minutes, period: 'monthly' },
-      webTasks: { used: dailyWebTasks, limit: LIMITS.web_tasks, period: 'daily' }
+      calls: { used: dailyCallMinutes, limit: LIMITS.call_minutes, period: 'daily' },
+      webTasks: { used: dailyWebTasks, limit: null, period: 'unlimited' }
     });
   } catch (err) {
     console.error(err);

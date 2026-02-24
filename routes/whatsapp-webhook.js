@@ -277,16 +277,6 @@ router.post('/', webhookLimiter, validateTwilioSignature, async (req, res) => {
 
     // ── Step 6: Check if this needs OpenClaw (web browsing / action) ──
     if (needsOpenClawAction(messageContent) && process.env.OPENCLAW_URL) {
-      // Check web_tasks limit before proceeding
-      if (!UNLIMITED_CUSTOMER_IDS.includes(customer.id)) {
-        const { checkLimit: checkWebLimit } = require('../services/usage');
-        const webCheck = await checkWebLimit(customer.id, 'web_tasks');
-        if (webCheck.exceeded) {
-          await sendWhatsAppReply(toNumber, fromNumber,
-            `You've reached your daily web task limit (2/day). Try again tomorrow!`);
-          return;
-        }
-      }
       await sendWhatsAppReply(toNumber, fromNumber,
         "On it! I'm looking into that for you now. This might take a minute...");
 

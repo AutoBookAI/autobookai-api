@@ -377,18 +377,6 @@ async function executeTool(customerId, toolName, toolInput) {
       console.log(`[OPENCLAW] Sending task for customer ${customerId}: ${taskMessage.substring(0, 200)}`,
         appCredentials.length ? `(with ${appCredentials.length} credential set(s))` : '(no credentials)');
 
-      // Check web_tasks usage limit
-      try {
-        const { checkLimit, incrementUsage } = require('./usage');
-        const webCheck = await checkLimit(customerId, 'web_tasks');
-        if (webCheck.exceeded) {
-          return { error: 'Daily web task limit reached (2/day). Try again tomorrow!' };
-        }
-        await incrementUsage(customerId, 'web_tasks');
-      } catch (err) {
-        console.warn('[OPENCLAW] Usage tracking error:', err.message);
-      }
-
       // Send to OpenClaw bridge with credentials
       const response = await fetch(`${OPENCLAW_URL}/browse`, {
         method: 'POST',
