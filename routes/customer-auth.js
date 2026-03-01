@@ -210,7 +210,7 @@ router.get('/profile', async (req, res) => {
               preferred_restaurants, dining_budget, preferred_airlines,
               seat_preference, cabin_class, hotel_preferences,
               loyalty_numbers, full_name, date_of_birth, passport_number,
-              preferred_contact, timezone, gmail_app_password
+              preferred_contact, timezone, gmail_app_password, delivery_address
        FROM customer_profiles WHERE customer_id=$1`,
       [req.customerId]
     );
@@ -239,7 +239,7 @@ router.patch('/profile', async (req, res) => {
     dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
     preferred_airlines, seat_preference, cabin_class, hotel_preferences,
     loyalty_numbers, full_name, date_of_birth, passport_number, preferred_contact,
-    timezone, gmail_app_password, phone_number,
+    timezone, gmail_app_password, phone_number, delivery_address,
   } = req.body;
 
   try {
@@ -283,13 +283,14 @@ router.patch('/profile', async (req, res) => {
          preferred_contact    = COALESCE($13, preferred_contact),
          timezone             = COALESCE($14, timezone),
          gmail_app_password   = COALESCE($15, gmail_app_password),
+         delivery_address     = COALESCE($16, delivery_address),
          updated_at           = NOW()
-       WHERE customer_id = $16`,
+       WHERE customer_id = $17`,
       [
         dietary_restrictions, cuisine_preferences, preferred_restaurants, dining_budget,
         preferred_airlines, seat_preference, cabin_class, hotel_preferences,
         encryptedLoyalty, full_name, encryptedDOB, encryptedPassport, preferred_contact,
-        timezone, encryptedGmail, req.customerId,
+        timezone, encryptedGmail, delivery_address, req.customerId,
       ]
     );
 

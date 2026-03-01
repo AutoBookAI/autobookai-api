@@ -182,6 +182,9 @@ async function initDB() {
       ALTER TABLE connected_apps ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'connected';
       ALTER TABLE connected_apps ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP;
 
+      -- Delivery address for food orders / shipping
+      ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS delivery_address TEXT;
+
       -- Password reset tokens
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255);
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP;

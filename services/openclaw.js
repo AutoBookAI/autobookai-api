@@ -60,6 +60,10 @@ function buildMemoryDocument(profile) {
     sections.push(`PREFERRED CONTACT METHOD: ${profile.preferred_contact}`);
   }
 
+  if (profile.delivery_address) {
+    sections.push(`DELIVERY ADDRESS: ${profile.delivery_address}`);
+  }
+
   return `=== PERSONAL AI ASSISTANT PROFILE ===\n\n${sections.join('\n\n')}\n\n=== END PROFILE ===\n\nAlways use this profile to personalise responses and make bookings. Never share this information with third parties.`;
 }
 
