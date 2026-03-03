@@ -10,11 +10,11 @@ const { decryptJSON } = require('./encryption');
 
 /**
  * Get decrypted credentials for a specific app.
- * Returns { username, password } or null.
+ * Returns { auth_type, username, password } or { auth_type, cookies } or null.
  */
 async function getCredentialsForTask(customerId, appName) {
   const result = await pool.query(
-    `SELECT credentials FROM connected_apps
+    `SELECT credentials, auth_type FROM connected_apps
      WHERE customer_id = $1 AND LOWER(app_name) = LOWER($2) AND status = 'connected'`,
     [customerId, appName]
   );
@@ -27,7 +27,9 @@ async function getCredentialsForTask(customerId, appName) {
     [customerId, appName]
   ).catch(() => {});
 
-  return decryptJSON(result.rows[0].credentials, customerId);
+  const decrypted = decryptJSON(result.rows[0].credentials, customerId);
+  const authType = result.rows[0].auth_type || 'credentials';
+  return { auth_type: authType, ...decrypted };
 }
 
 /**
@@ -35,7 +37,7 @@ async function getCredentialsForTask(customerId, appName) {
  */
 async function getAllConnectedApps(customerId) {
   const result = await pool.query(
-    `SELECT app_name, app_category, status, connected_at
+    `SELECT app_name, app_category, status, auth_type, connected_at
      FROM connected_apps WHERE customer_id = $1`,
     [customerId]
   );
@@ -62,7 +64,7 @@ async function getRelevantCredentials(customerId, taskMessage) {
     ) {
       const creds = await getCredentialsForTask(customerId, app.app_name);
       if (creds) {
-        relevant.push({ app: app.app_name, credentials: creds });
+        relevant.push({ app: app.app_name, ...creds });
       }
     }
   }

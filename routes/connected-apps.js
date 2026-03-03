@@ -91,7 +91,7 @@ async function verifyCredentials(appName, creds, loginUrl) {
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT app_name, app_category, status, connected_at, last_used_at
+      `SELECT app_name, app_category, auth_type, status, connected_at, last_used_at
        FROM connected_apps WHERE customer_id=$1 ORDER BY app_name`,
       [req.customerId]
     );
@@ -203,6 +203,34 @@ async function handleConnect(req, res) {
 
 // POST /api/customer/apps/connect — connect an app (verify + store encrypted credentials)
 router.post('/connect', handleConnect);
+
+// POST /api/customer/apps/connect-cookies — connect an app using exported browser cookies
+router.post('/connect-cookies', async (req, res) => {
+  const { app_name, category, cookies } = req.body;
+  if (!app_name || !cookies) {
+    return res.status(400).json({ error: 'app_name and cookies are required' });
+  }
+
+  try {
+    // Encrypt cookies the same way we encrypt credentials
+    const encrypted = encryptJSON({ cookies }, req.customerId);
+
+    const result = await pool.query(
+      `INSERT INTO connected_apps (customer_id, app_name, app_category, credentials, auth_type, status)
+       VALUES ($1, $2, $3, $4, 'cookies', 'connected')
+       ON CONFLICT (customer_id, app_name) DO UPDATE
+         SET credentials=$4, auth_type='cookies', app_category=COALESCE($3, connected_apps.app_category),
+             status='connected', connected_at=NOW()
+       RETURNING id`,
+      [req.customerId, app_name, category || null, encrypted]
+    );
+
+    res.json({ success: true, app_name, status: 'connected', auth_type: 'cookies', id: result.rows[0]?.id });
+  } catch (err) {
+    console.error('Connect app cookies error:', err);
+    res.status(500).json({ error: 'Failed to connect app' });
+  }
+});
 
 // POST /api/customer/apps — backward-compatible connect endpoint
 router.post('/', handleConnect);

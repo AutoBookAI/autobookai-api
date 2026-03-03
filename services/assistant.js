@@ -362,30 +362,57 @@ async function executeTool(customerId, toolName, toolInput) {
       if (toolInput.credentials_app) {
         const creds = await getCredentialsForTask(customerId, toolInput.credentials_app);
         if (creds) {
-          appCredentials.push({ app: toolInput.credentials_app, credentials: creds });
+          appCredentials.push({ app: toolInput.credentials_app, ...creds });
         }
       } else {
         // Auto-detect relevant apps from the task message
         appCredentials = await getRelevantCredentials(customerId, taskMessage);
       }
 
+      // Separate cookies and login credentials
+      const cookieApps = appCredentials.filter(a => a.auth_type === 'cookies');
+      const loginApps = appCredentials.filter(a => a.auth_type !== 'cookies');
+
+      // Build auth instructions prefix
+      let authInstructions = '';
+      if (cookieApps.length > 0) {
+        authInstructions += 'AUTHENTICATION: Browser cookies are provided and have been injected into the browser session. You are ALREADY LOGGED IN — do NOT try to log in again with username/password. Do NOT navigate to any login page. Go directly to the app and start the task.\n\n';
+      } else if (loginApps.length > 0) {
+        authInstructions += 'AUTHENTICATION: Username/password credentials are provided. Navigate to the login page and log in first, then proceed with the task.\n\n';
+      }
+
       // Also include customer profile info for the task
       const custResult = await pool.query('SELECT name FROM customers WHERE id=$1', [customerId]);
       const custName = custResult.rows[0]?.name || 'the customer';
-      taskMessage = `You are completing this task on behalf of ${custName}. ${taskMessage}`;
+      taskMessage = `${authInstructions}You are completing this task on behalf of ${custName}. ${taskMessage}`;
+
+      // Build cookies array for the request body
+      const allCookies = cookieApps.flatMap(a => {
+        const c = a.cookies;
+        return Array.isArray(c) ? c : [];
+      });
+
+      // Build credentials array for login-based apps (backward compatible)
+      const loginCredentials = loginApps.map(a => ({
+        app: a.app,
+        credentials: { username: a.username, password: a.password },
+      }));
 
       console.log(`[OPENCLAW] Sending task for customer ${customerId}: ${taskMessage.substring(0, 200)}`,
-        appCredentials.length ? `(with ${appCredentials.length} credential set(s))` : '(no credentials)');
+        appCredentials.length ? `(with ${appCredentials.length} credential set(s), ${cookieApps.length} cookie-based)` : '(no credentials)');
 
-      // Send to OpenClaw bridge with credentials
+      // Send to OpenClaw bridge with credentials and/or cookies
+      const requestBody = {
+        message: taskMessage,
+        timeout: 120,
+      };
+      if (loginCredentials.length > 0) requestBody.credentials = loginCredentials;
+      if (allCookies.length > 0) requestBody.cookies = allCookies;
+
       const response = await fetch(`${OPENCLAW_URL}/browse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: taskMessage,
-          timeout: 120,
-          credentials: appCredentials,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -398,6 +425,7 @@ async function executeTool(customerId, toolName, toolInput) {
         task: toolInput.task,
         url: toolInput.url,
         credentials_app: toolInput.credentials_app,
+        auth_type: cookieApps.length > 0 ? 'cookies' : 'credentials',
         response_length: result.response?.length || 0,
       });
 
@@ -439,13 +467,19 @@ function buildSystemPrompt(customerName, profileDocument, assistantName, connect
   // Build connected apps section
   let connectedAppsBlock = '';
   if (connectedApps && connectedApps.length > 0) {
-    const appList = connectedApps.map(a => `- ${a.app_name}`).join('\n');
+    const appList = connectedApps.map(a => {
+      const method = a.auth_type === 'cookies' ? '(cookies)' : '(login)';
+      return `- ${a.app_name} ${method}`;
+    }).join('\n');
     connectedAppsBlock = `\n═══ CONNECTED APPS (CREDENTIALS SAVED) ═══
 
-The customer has connected the following apps with saved login credentials:
+The customer has connected the following apps with saved authentication:
 ${appList}
 
-When the customer asks you to do something on any of these apps, use the openclaw_task tool with credentials_app set to the app name. The system will automatically decrypt and use their saved credentials to log in. Do NOT ask the customer for their username or password — they are already saved.
+When the customer asks you to do something on any of these apps, use the openclaw_task tool with credentials_app set to the app name. The system will automatically decrypt and use their saved credentials or cookies to authenticate. Do NOT ask the customer for their username or password — they are already saved.
+
+Apps marked (cookies) use browser cookie injection — the browser will already be logged in when it opens.
+Apps marked (login) use username/password — the browser will log in automatically.
 
 If the customer asks to use an app they have NOT connected above, suggest they connect it first at their Kova portal preferences page.\n`;
   }

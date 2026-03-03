@@ -188,6 +188,10 @@ async function initDB() {
       -- Password reset tokens
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255);
       ALTER TABLE customers ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP;
+
+      -- Cookie-based auth for connected apps
+      ALTER TABLE connected_apps ADD COLUMN IF NOT EXISTS auth_type VARCHAR(20) DEFAULT 'credentials';
+      ALTER TABLE connected_apps ADD COLUMN IF NOT EXISTS cookies TEXT;
     `);
 
     // ── Indexes (safe to re-run) ────────────────────────────────────────
