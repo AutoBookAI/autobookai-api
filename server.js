@@ -45,7 +45,8 @@ app.use(cors({
   origin: function(origin, callback) {
     if (!origin
         || origin === (process.env.FRONTEND_URL || 'http://localhost:3000')
-        || origin.endsWith('.up.railway.app')) {
+        || origin.endsWith('.up.railway.app')
+        || (origin && origin.startsWith('chrome-extension://'))) {
       callback(null, true);
     } else {
       callback(null, false);

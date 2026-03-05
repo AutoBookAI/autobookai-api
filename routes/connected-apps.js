@@ -106,7 +106,7 @@ router.get('/', async (req, res) => {
 router.get('/:appName/status', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT app_name, status FROM connected_apps
+      `SELECT app_name, status, auth_type FROM connected_apps
        WHERE customer_id=$1 AND app_name=$2`,
       [req.customerId, req.params.appName]
     );
@@ -117,6 +117,7 @@ router.get('/:appName/status', async (req, res) => {
       app_name: req.params.appName,
       connected: result.rows[0].status === 'connected' || result.rows[0].status === 'unverified',
       status: result.rows[0].status,
+      auth_type: result.rows[0].auth_type || 'credentials',
     });
   } catch (err) {
     console.error('App status error:', err);
